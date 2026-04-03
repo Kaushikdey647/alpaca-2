@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+from typing import List, Optional, Sequence, Tuple, Union
+
+import requests
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import yfinance as yf
+from finta import TA
+
+_OHLCV_EXCLUDE_CORR = frozenset({"Open", "High", "Low", "Close", "Adj Close", "Volume"})
+
+
+class finTs:
+    """Download OHLCV from yfinance and attach technical / stationary features."""
+
+    def __init__(
+        self,
+        start_date: Union[str, pd.Timestamp],
+        end_date: Union[str, pd.Timestamp],
+        ticker_list: Union[str, List[str]],
+        session: Optional[requests.Session] = None,
+    ) -> None:
+        self.start_date = start_date
+        self.end_date = end_date
+        self.session = session
+        if isinstance(ticker_list, str):
+            self.ticker_list = [ticker_list]
+        else:
+            self.ticker_list = list(ticker_list)
+
+        raw = yf.download(
+            self.ticker_list,
+            start=self.start_date,
+            end=self.end_date,
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            **({"session": session} if session is not None else {}),
+        )
+
+        if raw.empty:
+            self.df = raw
+            return
+
+        frames: List[pd.DataFrame] = []
+        keys: List[str] = []
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            available = raw.columns.get_level_values(0).unique().tolist()
+            for t in self.ticker_list:
+                if t not in available:
+                    continue
+                part = self._add_features(raw[t].copy())
+                frames.append(part)
+                keys.append(t)
+        else:
+            if len(self.ticker_list) != 1:
+                raise ValueError(
+                    "Multiple tickers were requested but yfinance returned a "
+                    "single-level column index; check ticker symbols and dates."
+                )
+            self.df = self._add_features(raw.copy())
+            return
+
+        if not frames:
+            self.df = pd.DataFrame()
+            return
+
+        if len(frames) == 1 and len(self.ticker_list) == 1:
+            self.df = frames[0]
+        else:
+            self.df = pd.concat(frames, keys=keys, names=["Ticker", None])
+            self.df.index = self.df.index.set_names(["Ticker", "Date"])
+
+    @staticmethod
+    def _add_features(df: pd.DataFrame) -> pd.DataFrame:
+        out = df
+
+        out["SMA_50"] = TA.SMA(out, 50)
+        out["SMA_200"] = TA.SMA(out, 200)
+        out["RSI_14"] = TA.RSI(out, 14)
+
+        macd_df = TA.MACD(out)
+        out["MACD"] = macd_df["MACD"]
+        out["MACD_Signal"] = macd_df["SIGNAL"]
+
+        bbands = TA.BBANDS(out)
+        out["BB_Upper"] = bbands["BB_UPPER"]
+        out["BB_Lower"] = bbands["BB_LOWER"]
+        out["ATR_14"] = TA.ATR(out, 14)
+
+        out["Future_1d_Ret"] = np.log(out["Close"].shift(-1) / out["Close"])
+
+        out["Log_Ret"] = np.log(out["Close"] / out["Close"].shift(1))
+        out["Dist_SMA50"] = (out["Close"] - out["SMA_50"]) / out["SMA_50"]
+        out["Dist_SMA200"] = (out["Close"] - out["SMA_200"]) / out["SMA_200"]
+        out["BB_Width"] = (out["BB_Upper"] - out["BB_Lower"]) / out["SMA_50"]
+        denom = (out["BB_Upper"] - out["BB_Lower"]).replace(0, np.nan)
+        out["BB_Position"] = (out["Close"] - out["BB_Lower"]) / denom
+        out["MACD_Hist"] = out["MACD"] - out["MACD_Signal"]
+        out["ATR_Norm"] = out["ATR_14"] / out["Close"]
+        out["Vol_Change"] = (
+            out["Volume"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
+        )
+
+        return out
+
+    def _require_nonempty_df(self) -> None:
+        if not isinstance(self.df, pd.DataFrame) or self.df.empty:
+            raise ValueError("No data loaded; dataframe is empty.")
+
+    def plot_correlation_heatmap(
+        self,
+        *,
+        columns: Optional[Sequence[str]] = None,
+        title: str = "S&P 500 Universe — Stationary Feature Correlation Matrix",
+        save_path: Optional[str] = "chart_correlation_heatmap.png",
+        figsize: Tuple[float, float] = (11, 9),
+        show: bool = True,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        """Pearson correlation matrix as a masked seaborn heatmap; works in Jupyter."""
+        self._require_nonempty_df()
+
+        numeric = self.df.select_dtypes(include=[np.number])
+        if columns is None:
+            use_cols = [c for c in numeric.columns if c not in _OHLCV_EXCLUDE_CORR]
+        else:
+            missing = [c for c in columns if c not in self.df.columns]
+            if missing:
+                raise KeyError(f"Unknown columns: {missing}")
+            use_cols = list(columns)
+
+        if not use_cols:
+            raise ValueError("No columns left for correlation.")
+
+        sample = self.df.loc[:, use_cols].dropna(how="any")
+        if sample.empty:
+            raise ValueError("All rows dropped after NA removal; cannot compute correlation.")
+
+        corr = sample.corr()
+        fig, ax = plt.subplots(figsize=figsize)
+        mask = np.triu(np.ones_like(corr, dtype=bool))
+
+        sns.heatmap(
+            corr,
+            mask=mask,
+            ax=ax,
+            cmap="coolwarm",
+            vmin=-1,
+            vmax=1,
+            center=0,
+            annot=True,
+            fmt=".2f",
+            annot_kws={"size": 8},
+            square=True,
+            linewidths=0.4,
+            cbar_kws={"shrink": 0.8, "label": "Pearson r"},
+        )
+        ax.set_title(title, pad=14)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+
+        plt.tight_layout()
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig, ax
+
+    def plot_component_returns(
+        self,
+        *,
+        title: str = "Normalized close by component (start = 1)",
+        save_path: Optional[str] = None,
+        figsize: Tuple[float, float] = (12, 6),
+        show: bool = True,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        """Plot each ticker's Close / first Close on shared axes with legend labels."""
+        self._require_nonempty_df()
+        if "Close" not in self.df.columns:
+            raise KeyError("Column 'Close' is required.")
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        if isinstance(self.df.index, pd.MultiIndex):
+            level_tickers = self.df.index.get_level_values(0).unique()
+            for ticker in level_tickers:
+                sub = self.df.xs(ticker, level=0, drop_level=True)
+                if sub.empty:
+                    continue
+                close = sub["Close"]
+                norm = close / close.iloc[0]
+                norm.plot(ax=ax, label=str(ticker))
+        else:
+            label = self.ticker_list[0] if len(self.ticker_list) == 1 else "Close"
+            close = self.df["Close"]
+            norm = close / close.iloc[0]
+            norm.plot(ax=ax, label=label)
+
+        ax.set_title(title, pad=12)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Normalized close")
+        ax.legend(loc="best", framealpha=0.9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig, ax
