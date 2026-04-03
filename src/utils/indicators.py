@@ -2,11 +2,12 @@
 Column names for :class:`src.data.fints.finTs` and integer indices for JAX feature vectors.
 
 - **Dataframe columns:** ``df[COL.SMA_50]`` or legacy module aliases ``df[SMA_50]``.
-- **JAX rows:** ``x[IX.RSI_14]`` with ``x`` shaped ``(len(STRATEGY_FEATURES),)``.
-  For live / no-lookahead inputs use ``STRATEGY_FEATURES_LIVE`` width and ``IX_LIVE``.
+- **JAX rows:** ``x[IX.CLOSE]``, ``x[IX.RSI_14]``, etc., with ``x`` shaped
+  ``(len(STRATEGY_FEATURES),)``. For live trading use ``IX_LIVE`` (no lookahead column).
 
-``STRATEGY_FEATURES`` order matches ``finTs._add_features``. ``Future_1d_Ret`` is
-**lookahead** — use ``IX_LIVE`` and 16-wide vectors for real-time ``FinStrat.pass_``.
+``STRATEGY_FEATURES`` begins with raw **OHLCV** (Open, High, Low, Close, Volume), then
+columns added in ``finTs._add_features``. ``Future_1d_Ret`` is **lookahead** — use
+``IX_LIVE`` for real-time ``FinStrat.pass_`` (OHLCV + live engineered columns).
 """
 
 from __future__ import annotations
@@ -22,6 +23,15 @@ _OHLCV_SPEC: tuple[tuple[str, str], ...] = (
     ("LOW", "Low"),
     ("CLOSE", "Close"),
     ("ADJ_CLOSE", "Adj Close"),
+    ("VOLUME", "Volume"),
+)
+
+# Leading block in FinStrat panels: OHLCV only (Adj Close omitted; use ``COL.ADJ_CLOSE`` on dataframe).
+_STRATEGY_OHLCV_SPEC: tuple[tuple[str, str], ...] = (
+    ("OPEN", "Open"),
+    ("HIGH", "High"),
+    ("LOW", "Low"),
+    ("CLOSE", "Close"),
     ("VOLUME", "Volume"),
 )
 
@@ -50,9 +60,12 @@ COL = SimpleNamespace(
     **{attr: col for attr, col in _OHLCV_SPEC + _ENGINEERED_SPEC},
 )
 
-# Integer positions into the 17-wide strategy vector (same names as COL for engineered).
+# Integer positions into the strategy panel: OHLCV (0..4) then engineered fields.
 IX = SimpleNamespace(
-    **{attr: i for i, (attr, _) in enumerate(_ENGINEERED_SPEC)},
+    **{
+        attr: i
+        for i, (attr, _) in enumerate(_STRATEGY_OHLCV_SPEC + _ENGINEERED_SPEC)
+    },
 )
 
 _LIVE_ENGINEERED_SPEC: tuple[tuple[str, str], ...] = tuple(
@@ -60,11 +73,22 @@ _LIVE_ENGINEERED_SPEC: tuple[tuple[str, str], ...] = tuple(
 )
 
 IX_LIVE = SimpleNamespace(
-    **{attr: i for i, (attr, _) in enumerate(_LIVE_ENGINEERED_SPEC)},
+    **{
+        attr: i
+        for i, (attr, _) in enumerate(_STRATEGY_OHLCV_SPEC + _LIVE_ENGINEERED_SPEC)
+    },
 )
 
-STRATEGY_FEATURES: tuple[str, ...] = tuple(c for _, c in _ENGINEERED_SPEC)
-STRATEGY_FEATURES_LIVE: tuple[str, ...] = tuple(c for _, c in _LIVE_ENGINEERED_SPEC)
+STRATEGY_FEATURES: tuple[str, ...] = tuple(c for _, c in _STRATEGY_OHLCV_SPEC) + tuple(
+    c for _, c in _ENGINEERED_SPEC
+)
+STRATEGY_FEATURES_LIVE: tuple[str, ...] = tuple(c for _, c in _STRATEGY_OHLCV_SPEC) + tuple(
+    c for _, c in _LIVE_ENGINEERED_SPEC
+)
+
+# Use with :meth:`FinStrat <src.algorithm.finstrat.FinStrat>` ``panel_columns=…`` when the alpha
+# only needs raw OHLCV (avoids SMA_200 / etc. warm-up so backtests start on the first bar).
+STRATEGY_PANEL_OHLCV_ONLY: tuple[str, ...] = tuple(c for _, c in _STRATEGY_OHLCV_SPEC)
 
 FEATURE_TO_IDX: dict[str, int] = {name: i for i, name in enumerate(STRATEGY_FEATURES)}
 FEATURE_TO_IDX_LIVE: dict[str, int] = {
@@ -76,7 +100,7 @@ for _attr, _col in _OHLCV_SPEC + _ENGINEERED_SPEC:
     globals()[_attr] = _col
 
 # Drift check: engineered columns added in finTs._add_features (order-independent).
-_ENGINEERED_COLUMNS_FINTS: frozenset[str] = frozenset(STRATEGY_FEATURES)
+_ENGINEERED_COLUMNS_FINTS: frozenset[str] = frozenset(c for _, c in _ENGINEERED_SPEC)
 
 
 def feature_index(name: str, *, live: bool = False) -> int:

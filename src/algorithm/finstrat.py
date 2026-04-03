@@ -55,6 +55,7 @@ class FinStrat:
         truncation: float = 0.0,
         max_single_weight: Optional[float] = None,
         jit_algorithm: bool = False,
+        panel_columns: Optional[Sequence[str]] = None,
     ) -> None:
         """
         Args:
@@ -72,6 +73,12 @@ class FinStrat:
                 fraction of ``capital``, then rescale gross to ``capital`` when possible.
             jit_algorithm: If True, wrap ``algorithm`` in :func:`jax.jit` so the raw
                 score step is XLA-compiled (best for pure JAX alphas with fixed shapes).
+            panel_columns: If set, :meth:`panel_at` only loads these dataframe columns (in
+                this order). Use e.g. :data:`src.utils.indicators.STRATEGY_PANEL_OHLCV_ONLY`
+                for OHLC-only alphas so rows are available from the first bar instead of
+                waiting for long-window indicators (SMA_200, …). Your ``algorithm`` must
+                index the panel consistently with this width (leading OHLCV slots still
+                match ``IX_LIVE.OPEN`` … ``VOLUME`` when those columns are included).
         """
         if not (0.0 <= decay < 1.0):
             raise ValueError(f"decay must be in [0, 1), got {decay}")
@@ -89,6 +96,11 @@ class FinStrat:
         self._truncation = float(truncation)
         self._max_single_weight = max_single_weight
         self._ema_prev: dict[str, float] = {}
+        self._panel_columns: Optional[Tuple[str, ...]] = (
+            tuple(panel_columns) if panel_columns is not None else None
+        )
+        if self._panel_columns is not None and not self._panel_columns:
+            raise ValueError("panel_columns must be non-empty when provided")
 
     @property
     def decay(self) -> float:
@@ -120,8 +132,9 @@ class FinStrat:
         If ``pasteurize`` is True (BRAIN-style pasteurization), impute column NaNs with
         the cross-sectional mean for that date (then still skip rows that are all-NaN).
 
-        Returns ``(panel, tickers)`` with features in ``STRATEGY_FEATURES_LIVE`` or
-        ``STRATEGY_FEATURES`` when ``live`` is False.
+        Returns ``(panel, tickers)``. Column order is ``STRATEGY_FEATURES_LIVE`` or
+        ``STRATEGY_FEATURES`` when ``live`` matches, unless ``panel_columns`` was set on
+        :class:`FinStrat` (then that tuple defines ``feat_cols``).
         """
         df = self._ts.df
         if not isinstance(df, pd.DataFrame) or df.empty:
@@ -137,9 +150,14 @@ class FinStrat:
 
         dt = pd.Timestamp(date)
         use_live = live
-        feat_cols = list(
-            indicators.STRATEGY_FEATURES_LIVE if use_live else indicators.STRATEGY_FEATURES
-        )
+        if self._panel_columns is not None:
+            feat_cols = list(self._panel_columns)
+        else:
+            feat_cols = list(
+                indicators.STRATEGY_FEATURES_LIVE
+                if use_live
+                else indicators.STRATEGY_FEATURES
+            )
         missing = [c for c in feat_cols if c not in df.columns]
         if missing:
             raise KeyError(f"Dataframe missing feature columns: {missing}")

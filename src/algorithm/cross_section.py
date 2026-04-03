@@ -104,10 +104,16 @@ def neutralize_groups(s: jnp.ndarray, group_ids: jnp.ndarray) -> jnp.ndarray:
 @jax.jit
 def rank(x: jnp.ndarray) -> jnp.ndarray:
     """
-    Cross-sectional rank normalized to approximately ``[0, 1]`` (smaller ``x`` → smaller rank).
+    Cross-sectional rank normalized to approximately ``[0, 1]``, **monotone in** ``x``:
+    **smallest** raw value → **0**, **largest** → **1** (ties: ``argsort`` order).
 
-    Ties follow ``argsort`` ordering (not average rank). Prefer NaN-free panels from
-    :meth:`FinStrat.panel_at`; otherwise NaNs sort last. JIT-compiled.
+    Therefore ``rank(-x)`` **reverses** who gets high vs low scores. With **distinct**
+    values and ``n \\ge 2``, ``rank(-x) = 1 - rank(x)`` elementwise. Dollar weights after
+    market-demeaning in :meth:`~src.algorithm.finstrat.FinStrat.pass_` flip sign when
+    you swap ``rank(raw)`` for ``rank(-raw)``; if results look identical, re-run the
+    cell or confirm you are comparing ``scores`` / ``pass_`` after the change.
+
+    Prefer NaN-free inputs; otherwise NaNs sort last. JIT-compiled.
     """
     x = jnp.asarray(x, dtype=jnp.float32)
     n = x.shape[0]

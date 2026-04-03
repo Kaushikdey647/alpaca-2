@@ -14,7 +14,13 @@ _OHLCV_EXCLUDE_CORR = frozenset({"Open", "High", "Low", "Close", "Adj Close", "V
 
 
 class finTs:
-    """Download OHLCV from yfinance and attach technical / stationary features."""
+    """
+    Download OHLCV from yfinance and attach technical / stationary features.
+
+    Raw ``Open``, ``High``, ``Low``, ``Close``, and ``Volume`` are kept on the frame and
+    are the first columns in :obj:`src.utils.indicators.STRATEGY_FEATURES` / ``IX_LIVE``
+    for :class:`src.algorithm.finstrat.FinStrat` panels.
+    """
 
     def __init__(
         self,
