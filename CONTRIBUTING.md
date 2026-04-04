@@ -1,4 +1,4 @@
-# Contribution Guide
+# Contributing
 
 This document explains how the framework is structured and how to add features safely.
 
@@ -72,7 +72,7 @@ Use this sequence to avoid regressions:
    - Unit tests for helper functions.
    - Behavioral tests for `FinBT`/`FinTrade`.
 5. Update docs
-   - Add usage snippet and caveats in `README.md`.
+   - Add usage snippet and caveats in [`README.md`](README.md).
 
 ## Common extension recipes
 
@@ -120,11 +120,12 @@ Use this sequence to avoid regressions:
 
 ## Testing expectations
 
-Run:
+Run (same as [`README.md`](README.md); add `-q` for quieter output):
 
 ```bash
 uv sync --extra dev
-uv run pytest -q
+uv run pytest
+# or: uv run pytest -q
 ```
 
 When changing critical paths, add tests in relevant files:
@@ -133,6 +134,7 @@ When changing critical paths, add tests in relevant files:
 - Data providers/contracts: `tests/test_providers.py`
 - Data QA: `tests/test_data_qa.py`
 - Signal/pipeline: `tests/test_finstrat.py`, `tests/test_cross_section.py`
+- Operator libraries: `tests/test_time_series.py`, `tests/test_logical_ops.py`, `tests/test_group_ops.py`
 - Backtest behavior: `tests/test_finbt.py`
 - Target/risk helpers: `tests/test_targets.py`, `tests/test_constraints.py`
 - Trading/execution: `tests/test_fintrade.py`, `tests/test_execution_adapter.py`
@@ -145,7 +147,7 @@ When changing critical paths, add tests in relevant files:
 - [ ] Warnings/reporting updated for new risk/execution behavior.
 - [ ] Reconciliation behavior tested for residual and remediation paths.
 - [ ] Tests added/updated and passing.
-- [ ] `README.md` updated for user-facing changes.
+- [ ] [`README.md`](README.md) updated for user-facing changes.
 
 ## Notes on market data and fundamentals
 

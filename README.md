@@ -8,7 +8,7 @@
 
 Small Python stack for **multi-ticker equity panels**, **JAX alpha functions** (WorldQuant BRAIN-style processing), and **backtrader** backtests. Historical data is provider-driven (`yfinance` by default, optional Alpaca bars); features include OHLCV plus technicals from `finta`.
 
-See `CONTRIBUTION.md` for architecture details, extension patterns, and coding guidelines.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture details, extension patterns, and coding guidelines.
 
 ## Layout
 
@@ -18,7 +18,7 @@ See `CONTRIBUTION.md` for architecture details, extension patterns, and coding g
 | `src.algorithm` | `FinStrat` (alpha pipeline), `FinBT` (backtrader), `FinTrade` (Alpaca live/paper orders), `cross_section` (rank, zscore, winsorize, neutralization) |
 | `src.utils` | `indicators` — column namespaces (`COL`, `IX`, `IX_LIVE`), strategy feature lists, helpers |
 
-Public re-exports from `src`:
+Common imports from `src` (illustrative):
 
 ```python
 from src import (
@@ -31,6 +31,8 @@ from src import (
     indicators,
 )
 ```
+
+The canonical set of symbols re-exported at the package root is `__all__` in [`src/__init__.py`](src/__init__.py) (e.g. `PanelQADiagnostics`, `YFinanceMarketDataProvider`, target helpers, `logical`, `time_series`, `group_ops`, timestamp helpers). `OrderAttempt` is part of `src.algorithm` only: `from src.algorithm import OrderAttempt`.
 
 ## Core ideas
 
@@ -134,9 +136,10 @@ fts = finTs(
 decision = DecisionContext(data_source="alpaca_bars")
 ```
 
-## Notebook
+## Notebooks
 
-`test.ipynb` walks through `finTs` → `FinStrat` (CLV × volume style alpha) → `FinBT`.
+- [`vwap_close_rank_backtest_yfinance.ipynb`](vwap_close_rank_backtest_yfinance.ipynb) — `finTs` (default `YFinanceMarketDataProvider`) → `FinStrat` (`rank(VWAP/Close)`) → `FinBT`.
+- [`vwap_close_rank_backtest.ipynb`](vwap_close_rank_backtest.ipynb) — same alpha and `FinBT` flow with **`AlpacaHistoricalMarketDataProvider`** (requires `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY`).
 
 ## Requirements
 
@@ -206,5 +209,5 @@ uv run pytest
 
 ## Documentation
 
-- Main usage and behavior: `README.md`
-- Contributor and architecture guide: `CONTRIBUTION.md`
+- Main usage and behavior: [`README.md`](README.md)
+- Contributor and architecture guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)

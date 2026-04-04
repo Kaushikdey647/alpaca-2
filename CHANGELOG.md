@@ -38,7 +38,7 @@ All notable changes to this project are documented in this file.
   - turnover budget enforcement
   - ADV participation caps
 - New documentation:
-  - `CONTRIBUTION.md`
+  - `CONTRIBUTING.md` (contributor guide; previously `CONTRIBUTION.md`)
   - expanded `README.md` sections for controls, diagnostics, and roadmap status
 
 ### Changed
@@ -61,4 +61,4 @@ All notable changes to this project are documented in this file.
   - `tests/test_fintrade.py`
   - `tests/test_finstrat.py`
   - `tests/test_targets.py`
-- Current status: full suite passing (`41 passed`).
+- Current status: full suite passing (`64 passed`).
