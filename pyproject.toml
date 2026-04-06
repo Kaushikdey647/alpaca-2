@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shunya-py"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-ticker equity panels, JAX alphas, and backtrader backtests with yfinance or Alpaca data."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-notebook = ["ipykernel>=7.2.0"]
+notebook = ["curl-cffi>=0.6.0", "ipykernel>=7.2.0"]
 dev = ["pytest>=8.0", "twine>=6.0"]
 
 [project.urls]

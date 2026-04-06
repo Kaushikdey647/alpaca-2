@@ -26,7 +26,9 @@ flowchart LR
   - Builds the canonical panel (`Ticker`, `Date`) dataframe.
   - Adds engineered features and classification columns.
 - `shunya/algorithm/finstrat.py`
-  - Alpha pipeline: raw scores, optional decay, truncation, neutralization, and scaling.
+  - Alpha pipeline: builds `AlphaContext`, computes raw scores, then optional decay, truncation, neutralization, and scaling.
+- `shunya/algorithm/alpha_context.py`
+  - Alpha authoring interface (`ctx.open/high/low/close/adj_volume`, `ctx.ts.*`, `ctx.cs.*`).
 - `shunya/algorithm/finbt.py`
   - Backtrader wrapper for paper/research simulation.
 - `shunya/algorithm/fintrade.py`
@@ -36,7 +38,7 @@ flowchart LR
 - `shunya/algorithm/targets.py`
   - Shared target/delta/cap helpers used in both backtest and trade paths (gross/net caps, turnover budgets, ADV caps).
 - `shunya/utils/indicators.py`
-  - Feature names and index constants (`COL`, `IX`, `IX_LIVE`).
+  - Dataframe feature names and compatibility constants.
 
 ## Design principles
 
@@ -78,9 +80,9 @@ Use this sequence to avoid regressions:
 
 ### 0) Add or modify a market data provider
 
-- Implement `MarketDataProvider.download(ticker_list, start, end) -> DataFrame`.
+- Implement `MarketDataProvider.download(ticker_list, start, end, *, bar_spec=None, bar_index_policy=None) -> DataFrame`.
 - Keep provider output contract stable:
-  - index is `DatetimeIndex`, daily-normalized, named `"Date"`
+  - index is `DatetimeIndex`, named `"Date"`, normalized per `bar_index_policy` (timezone + naive vs aware)
   - single ticker returns flat OHLCV columns
   - multiple tickers return MultiIndex columns as `(Ticker, Field)`
 - Required OHLCV fields per symbol are `Open`, `High`, `Low`, `Close`, `Volume`.
@@ -92,7 +94,7 @@ Use this sequence to avoid regressions:
 - Add computation in `finTs._add_features`.
 - Update `shunya/utils/indicators.py` constants and ordering.
 - Add tests ensuring the column exists and is numeric/usable.
-- If lookahead-sensitive, ensure `IX_LIVE` exclusion rules are correct.
+- If lookahead-sensitive, keep it out of live alpha context inputs.
 
 ### 2) Add a new neutralization/control mode
 
@@ -117,6 +119,21 @@ Use this sequence to avoid regressions:
 - Keep timestamp resolution in `decision.py`.
 - Keep orchestration warnings in `FinTrade.run`.
 - Add tests for weekend/future/staleness/same-session behavior.
+
+### 6) Trading-time axis changes
+
+- Keep the default behavior backward-compatible unless the change is explicitly intended to be breaking:
+  - `finTs(..., trading_axis_mode="observed")` follows observed panel timestamps.
+  - `finTs(..., trading_axis_mode="canonical")` uses canonical US-equities trading bars.
+- Use `shunya.data.timeframes` helpers for new time-axis logic:
+  - `build_trading_calendar(...)`
+  - `timestamp_is_on_trading_grid(...)`
+  - `trading_time_distance(...)`
+- For stricter provider contracts, use `strict_trading_grid=True` in `finTs` to reject off-grid timestamps and missing in-session bars.
+- For strategy decay semantics:
+  - `FinStrat(..., temporal_mode="bar_step")` = one-step-per-bar.
+  - `FinStrat(..., temporal_mode="elapsed_trading_time")` = advance decay by trading-time distance.
+  - Ensure execution orchestrators pass `execution_date` into `FinStrat.pass_` (already wired in `FinBT` and `FinTrade`).
 
 ## Testing expectations
 

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.fints import finTs
+from ..data.timeframes import bar_spec_is_intraday
 from .finstrat import FinStrat
 from .targets import (
     apply_group_gross_cap,
@@ -32,6 +33,7 @@ class _FinBTStrategy(bt.Strategy):
         ("turnover_budget_fraction", None),
         ("adv_participation_fraction", None),
         ("constraints_mode", "rescale"),
+        ("validate_finite_targets", True),
     )
 
     def __init__(self) -> None:
@@ -45,121 +47,135 @@ class _FinBTStrategy(bt.Strategy):
         self.turnover_history: List[Tuple[pd.Timestamp, float]] = []
         self.group_exposure_history: List[Tuple[pd.Timestamp, Dict[str, Dict[str, float]]]] = []
         self._prev_targets: Dict[str, float] = {}
+        self._prev_exec_dt: Optional[pd.Timestamp] = None
 
     def _current_dt(self) -> pd.Timestamp:
         return pd.Timestamp(bt.num2date(self.datas[0].datetime[0]))
 
     def next(self) -> None:
-        self.equity_curve.append((self._current_dt(), float(self.broker.getvalue())))
-        fs: FinStrat = self.p.fin_strat
-        try:
-            panel, names = fs.panel_at(self._current_dt(), live=True)
-        except ValueError:
-            return
-        capital = float(self.broker.getvalue())
-        if capital <= 0:
-            return
-        pass_kw: dict = {"tickers": names}
-        if fs.neutralization == "group":
-            col = self.p.group_column
-            if not col:
-                raise ValueError(
-                    "FinStrat uses neutralization='group'; pass group_column= to FinBT(…)"
-                )
-            pass_kw["group_ids"] = fs.group_labels_at(self._current_dt(), names, col)
-        raw = fs.pass_(panel, capital, **pass_kw)
-        targets = np.asarray(jnp.asarray(raw), dtype=float)
-        name_to_target = {n: float(targets[i]) for i, n in enumerate(names)}
-        if self.p.sector_gross_cap_fraction is not None:
-            gcol = self.p.sector_group_column
-            group_ids = fs.group_labels_at(self._current_dt(), names, gcol)
-            group_map = {n: str(group_ids[i]) for i, n in enumerate(names)}
-            name_to_target, _breached = apply_group_gross_cap(
-                name_to_target,
-                group_map,
-                max_group_gross_fraction=float(self.p.sector_gross_cap_fraction),
-                on_breach=self.p.sector_cap_mode,
-            )
-        if self.p.group_net_cap_fraction is not None:
-            gcol = self.p.sector_group_column
-            group_ids = fs.group_labels_at(self._current_dt(), names, gcol)
-            group_map = {n: str(group_ids[i]) for i, n in enumerate(names)}
-            name_to_target, _breached_net = apply_group_net_cap(
-                name_to_target,
-                group_map,
-                max_group_net_fraction=float(self.p.group_net_cap_fraction),
-                on_breach=self.p.constraints_mode,
-            )
-        if self.p.turnover_budget_fraction is not None and self._prev_targets:
-            name_to_target, _obs_turn, _limit_turn = enforce_turnover_budget(
-                name_to_target,
-                self._prev_targets,
-                max_turnover_fraction=float(self.p.turnover_budget_fraction),
-                on_breach=self.p.constraints_mode,
-            )
-        if self.p.adv_participation_fraction is not None and self._prev_targets:
-            raw_deltas = {
-                n: float(name_to_target.get(n, 0.0) - self._prev_targets.get(n, 0.0))
-                for n in names
-            }
-            adv_usd = {}
-            dt = self._current_dt()
-            df = fs._ts.df
-            for n in names:
-                key = (n, dt)
-                if key not in df.index:
-                    continue
-                row = df.loc[key]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[-1]
-                close = float(row.get("Close", np.nan))
-                vol = float(row.get("Volume", np.nan))
-                if np.isfinite(close) and np.isfinite(vol) and close > 0 and vol >= 0:
-                    adv_usd[n] = close * vol
-            capped_deltas, _breached_adv = cap_deltas_by_adv(
-                raw_deltas,
-                adv_usd,
-                max_adv_fraction=float(self.p.adv_participation_fraction),
-                on_breach=self.p.constraints_mode,
-            )
-            for n in names:
-                base = float(self._prev_targets.get(n, 0.0))
-                name_to_target[n] = base + float(capped_deltas.get(n, 0.0))
-
         dt = self._current_dt()
-        full_targets = {t: float(name_to_target.get(t, 0.0)) for t in self.p.ticker_order}
-        self.target_history.append((dt, full_targets))
-        if self._prev_targets:
-            turnover = sum(
-                abs(full_targets.get(t, 0.0) - self._prev_targets.get(t, 0.0))
-                for t in self.p.ticker_order
-            )
-            self.turnover_history.append((dt, float(turnover)))
-        self._prev_targets = dict(full_targets)
-
-        if self.p.sector_group_column:
+        fs: FinStrat = self.p.fin_strat
+        ts = fs._ts
+        if fs.intraday_session_isolated_lag and bar_spec_is_intraday(ts.bar_spec):
+            if self._prev_exec_dt is not None:
+                if ts.trading_session_key(dt) != ts.trading_session_key(self._prev_exec_dt):
+                    fs.reset_pipeline_state()
+        try:
+            self.equity_curve.append((dt, float(self.broker.getvalue())))
             try:
+                names = fs.tickers_at(dt)
+            except ValueError:
+                return
+            if not names:
+                return
+            capital = float(self.broker.getvalue())
+            if capital <= 0:
+                return
+            pass_kw: dict = {"tickers": names}
+            if fs.neutralization == "group":
+                col = self.p.group_column
+                if not col:
+                    raise ValueError(
+                        "FinStrat uses neutralization='group'; pass group_column= to FinBT(…)"
+                    )
+                pass_kw["group_ids"] = fs.group_labels_at(dt, names, col)
+            raw = fs.pass_(None, capital, execution_date=dt, **pass_kw)
+            targets = np.asarray(jnp.asarray(raw), dtype=float)
+            name_to_target = {n: float(targets[i]) for i, n in enumerate(names)}
+            if self.p.sector_gross_cap_fraction is not None:
                 gcol = self.p.sector_group_column
-                gids = fs.group_labels_at(dt, names, gcol)
-                gross_by_group: Dict[str, float] = {}
-                net_by_group: Dict[str, float] = {}
-                for i, n in enumerate(names):
-                    g = str(gids[i])
-                    v = float(name_to_target.get(n, 0.0))
-                    gross_by_group[g] = gross_by_group.get(g, 0.0) + abs(v)
-                    net_by_group[g] = net_by_group.get(g, 0.0) + v
-                self.group_exposure_history.append(
-                    (dt, {"gross_by_group": gross_by_group, "net_by_group": net_by_group})
+                group_ids = fs.group_labels_at(dt, names, gcol)
+                group_map = {n: str(group_ids[i]) for i, n in enumerate(names)}
+                name_to_target, _breached = apply_group_gross_cap(
+                    name_to_target,
+                    group_map,
+                    max_group_gross_fraction=float(self.p.sector_gross_cap_fraction),
+                    on_breach=self.p.sector_cap_mode,
                 )
-            except Exception:
-                pass
+            if self.p.group_net_cap_fraction is not None:
+                gcol = self.p.sector_group_column
+                group_ids = fs.group_labels_at(dt, names, gcol)
+                group_map = {n: str(group_ids[i]) for i, n in enumerate(names)}
+                name_to_target, _breached_net = apply_group_net_cap(
+                    name_to_target,
+                    group_map,
+                    max_group_net_fraction=float(self.p.group_net_cap_fraction),
+                    on_breach=self.p.constraints_mode,
+                )
+            if self.p.turnover_budget_fraction is not None and self._prev_targets:
+                name_to_target, _obs_turn, _limit_turn = enforce_turnover_budget(
+                    name_to_target,
+                    self._prev_targets,
+                    max_turnover_fraction=float(self.p.turnover_budget_fraction),
+                    on_breach=self.p.constraints_mode,
+                )
+            if self.p.adv_participation_fraction is not None and self._prev_targets:
+                raw_deltas = {
+                    n: float(name_to_target.get(n, 0.0) - self._prev_targets.get(n, 0.0))
+                    for n in names
+                }
+                adv_usd = {}
+                df = fs._ts.df
+                for n in names:
+                    key = (n, dt)
+                    if key not in df.index:
+                        continue
+                    row = df.loc[key]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[-1]
+                    close = float(row.get("Close", np.nan))
+                    vol = float(row.get("Volume", np.nan))
+                    if np.isfinite(close) and np.isfinite(vol) and close > 0 and vol >= 0:
+                        adv_usd[n] = close * vol
+                capped_deltas, _breached_adv = cap_deltas_by_adv(
+                    raw_deltas,
+                    adv_usd,
+                    max_adv_fraction=float(self.p.adv_participation_fraction),
+                    on_breach=self.p.constraints_mode,
+                )
+                for n in names:
+                    base = float(self._prev_targets.get(n, 0.0))
+                    name_to_target[n] = base + float(capped_deltas.get(n, 0.0))
 
-        for t in self.p.ticker_order:
-            d = self._ticker_to_data.get(t)
-            if d is None:
-                continue
-            tv = name_to_target.get(t, 0.0)
-            self.order_target_value(data=d, target=tv)
+            full_targets = {t: float(name_to_target.get(t, 0.0)) for t in self.p.ticker_order}
+            if self.p.validate_finite_targets:
+                for t, v in full_targets.items():
+                    if not np.isfinite(v):
+                        raise ValueError(f"non-finite portfolio target for {t!r}: {v!r}")
+            self.target_history.append((dt, full_targets))
+            if self._prev_targets:
+                turnover = sum(
+                    abs(full_targets.get(t, 0.0) - self._prev_targets.get(t, 0.0))
+                    for t in self.p.ticker_order
+                )
+                self.turnover_history.append((dt, float(turnover)))
+            self._prev_targets = dict(full_targets)
+
+            if self.p.sector_group_column:
+                try:
+                    gcol = self.p.sector_group_column
+                    gids = fs.group_labels_at(dt, names, gcol)
+                    gross_by_group: Dict[str, float] = {}
+                    net_by_group: Dict[str, float] = {}
+                    for i, n in enumerate(names):
+                        g = str(gids[i])
+                        v = float(name_to_target.get(n, 0.0))
+                        gross_by_group[g] = gross_by_group.get(g, 0.0) + abs(v)
+                        net_by_group[g] = net_by_group.get(g, 0.0) + v
+                    self.group_exposure_history.append(
+                        (dt, {"gross_by_group": gross_by_group, "net_by_group": net_by_group})
+                    )
+                except Exception:
+                    pass
+
+            for t in self.p.ticker_order:
+                d = self._ticker_to_data.get(t)
+                if d is None:
+                    continue
+                tv = name_to_target.get(t, 0.0)
+                self.order_target_value(data=d, target=tv)
+        finally:
+            self._prev_exec_dt = dt
 
 
 class FinBT:
@@ -168,6 +184,9 @@ class FinBT:
 
     Requires multi-ticker ``fin_ts.df`` with ``(Ticker, Date)`` MultiIndex. Construct
     :class:`FinStrat` with the **same** ``fin_ts`` instance.
+    Bar cadence follows ``fin_ts.bar_spec``; :meth:`results` Sharpe and printed return
+    labels assume backtrader's per-bar semantics (daily bars ≈ annualized trading figures;
+    intraday bars need manual scaling for calendar-year metrics).
 
     :meth:`run` resets :meth:`FinStrat.reset_pipeline_state` so BRAIN-style **decay**
     (temporal EMA) starts clean. If ``fin_strat.neutralization == 'group'``,
@@ -175,8 +194,10 @@ class FinBT:
     ``(Ticker, Date)`` row.
 
     ``commission`` is passed to backtrader's broker as the commission rate; set
-    ``slippage_pct`` to a positive fraction (e.g. ``0.0005`` for 5 bps) for adverse
-    percent slippage on executions.
+    ``slippage_pct`` to a positive fraction for adverse percent slippage on
+    executions. A common conservative choice for liquid, active strategies is
+    ``0.0002`` (2 bps per trade); fast markets or larger notionals may warrant
+    ``0.0005`` (5 bps) or higher.
     """
 
     def __init__(
@@ -195,6 +216,7 @@ class FinBT:
         turnover_budget_fraction: Optional[float] = None,
         adv_participation_fraction: Optional[float] = None,
         constraints_mode: str = "rescale",
+        validate_finite_targets: bool = True,
     ) -> None:
         if fin_strat._ts is not fin_ts:
             raise ValueError("fin_strat must be built with the same fin_ts instance (identity).")
@@ -247,14 +269,15 @@ class FinBT:
             raise ValueError("adv_participation_fraction must be in (0, 1]")
         if self._constraints_mode not in ("rescale", "raise"):
             raise ValueError("constraints_mode must be 'rescale' or 'raise'")
+        self._validate_finite_targets = bool(validate_finite_targets)
         self._cerebro: Optional[bt.Cerebro] = None
         self._run_result: Optional[List[Any]] = None
 
     @staticmethod
     def _ohlcv_frames(fin_ts: finTs) -> Dict[str, pd.DataFrame]:
-        out: Dict[str, pd.DataFrame] = {}
         df = fin_ts.df
         need = ["Open", "High", "Low", "Close", "Volume"]
+        raw: Dict[str, pd.DataFrame] = {}
         for t in fin_ts.ticker_list:
             if t not in df.index.get_level_values(0):
                 continue
@@ -265,9 +288,34 @@ class FinBT:
             ohlc = sub[need].sort_index()
             ohlc.index = pd.to_datetime(ohlc.index)
             ohlc = ohlc[~ohlc.index.duplicated(keep="last")]
-            out[t] = ohlc
-        if len(out) < 2:
+            raw[t] = ohlc
+        if len(raw) < 2:
             raise ValueError("Need at least two tickers with OHLCV rows for FinBT.")
+
+        cal = fin_ts._aligned_calendar
+        if cal is not None and len(cal):
+            common = cal
+        else:
+            intraday = bar_spec_is_intraday(fin_ts.bar_spec)
+            if intraday:
+                idx_sets = [set(pd.DatetimeIndex(f.index)) for f in raw.values()]
+            else:
+                idx_sets = [
+                    set(pd.DatetimeIndex(f.index).normalize()) for f in raw.values()
+                ]
+            common = pd.DatetimeIndex(sorted(set.intersection(*idx_sets)))
+        if len(common) == 0:
+            raise ValueError("Empty common OHLCV calendar; align tickers or widen dates.")
+
+        out: Dict[str, pd.DataFrame] = {}
+        for t, ohlc in raw.items():
+            aligned = ohlc.reindex(common)
+            if aligned[need].isna().any().any():
+                raise ValueError(
+                    f"FinBT: missing OHLCV for {t!r} on common calendar; "
+                    "run finTs.align_universe(...) on required columns first."
+                )
+            out[t] = aligned
         return out
 
     def run(self, **cerebro_kw: Any) -> FinBT:
@@ -304,6 +352,7 @@ class FinBT:
             turnover_budget_fraction=self._turnover_budget_fraction,
             adv_participation_fraction=self._adv_participation_fraction,
             constraints_mode=self._constraints_mode,
+            validate_finite_targets=self._validate_finite_targets,
         )
         cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
         cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
@@ -313,7 +362,9 @@ class FinBT:
         self._run_result = cerebro.run()
         return self
 
-    def results(self, *, show: bool = True) -> Dict[str, Any]:
+    def results(
+        self, *, show: bool = True, include_pre_execution: bool = False
+    ) -> Dict[str, Any]:
         """
         Drill-down dashboard: equity curve, drawdown, and key analyzer metrics.
 
@@ -324,7 +375,17 @@ class FinBT:
             raise RuntimeError("Call run() before results().")
 
         strat: _FinBTStrategy = self._run_result[0]
-        equity = pd.DataFrame(strat.equity_curve, columns=["Date", "Equity"]).set_index("Date")
+        equity_full = pd.DataFrame(strat.equity_curve, columns=["Date", "Equity"]).set_index("Date")
+        execution_start: Optional[pd.Timestamp] = (
+            pd.Timestamp(strat.target_history[0][0]) if strat.target_history else None
+        )
+        if not include_pre_execution and execution_start is not None:
+            equity = equity_full.loc[equity_full.index >= execution_start].copy()
+            if equity.empty:
+                equity = equity_full.copy()
+                execution_start = None
+        else:
+            equity = equity_full.copy()
         equity["Peak"] = equity["Equity"].cummax()
         equity["DrawdownPct"] = (equity["Equity"] / equity["Peak"] - 1.0) * 100.0
 
@@ -332,20 +393,67 @@ class FinBT:
         dd_a = strat.analyzers.drawdown.get_analysis()
         sh_a = strat.analyzers.sharpe.get_analysis()
 
+        bar = self._ts.bar_spec
+        eq_ret = equity["Equity"].pct_change().dropna()
+        start_val = float(equity["Equity"].iloc[0]) if len(equity) else float(self._cash)
+        end_val = float(equity["Equity"].iloc[-1]) if len(equity) else float(self._cash)
+        total_return_pct = ((end_val / start_val - 1.0) * 100.0) if start_val > 0 else 0.0
+        avg_bar_return_pct = float(eq_ret.mean() * 100.0) if len(eq_ret) else 0.0
+        max_drawdown_pct = float(abs(equity["DrawdownPct"].min())) if len(equity) else 0.0
+        in_dd = (equity["DrawdownPct"] < 0).astype(int) if len(equity) else pd.Series(dtype=int)
+        max_dd_len = 0
+        run = 0
+        for v in in_dd.to_numpy(dtype=int):
+            if v:
+                run += 1
+                if run > max_dd_len:
+                    max_dd_len = run
+            else:
+                run = 0
+        if bar.unit.name == "SECONDS":
+            periods_per_year = (252.0 * 6.5 * 60.0 * 60.0) / max(1.0, float(bar.step))
+        elif bar.unit.name == "MINUTES":
+            periods_per_year = (252.0 * 6.5 * 60.0) / max(1.0, float(bar.step))
+        elif bar.unit.name == "HOURS":
+            periods_per_year = (252.0 * 6.5) / max(1.0, float(bar.step))
+        elif bar.unit.name == "DAYS":
+            periods_per_year = 252.0 / max(1.0, float(bar.step))
+        elif bar.unit.name == "WEEKS":
+            periods_per_year = 52.0 / max(1.0, float(bar.step))
+        elif bar.unit.name == "MONTHS":
+            periods_per_year = 12.0 / max(1.0, float(bar.step))
+        else:
+            periods_per_year = 1.0 / max(1.0, float(bar.step))
+        if len(eq_ret) > 1 and float(eq_ret.std(ddof=1)) > 0:
+            sharpe_trimmed = float(
+                np.sqrt(periods_per_year) * (eq_ret.mean() / eq_ret.std(ddof=1))
+            )
+        else:
+            sharpe_trimmed = None
         metrics = {
-            "start_value": self._cash,
-            "end_value": float(equity["Equity"].iloc[-1]) if len(equity) else self._cash,
-            "total_return_pct": (ret_a.get("rtot", 0.0) or 0.0) * 100.0,
-            "avg_daily_return_pct": (ret_a.get("ravg", 0.0) or 0.0) * 100.0,
-            "max_drawdown_pct": (dd_a.get("max", {}).get("drawdown", None) or 0.0),
-            "max_drawdown_len": dd_a.get("max", {}).get("len", None),
-            "sharpe_ratio": sh_a.get("sharperatio", None),
+            "start_value": start_val,
+            "end_value": end_val,
+            "total_return_pct": total_return_pct,
+            "avg_daily_return_pct": avg_bar_return_pct,
+            "max_drawdown_pct": max_drawdown_pct,
+            "max_drawdown_len": int(max_dd_len),
+            "sharpe_ratio": sharpe_trimmed,
+            "execution_start": str(execution_start) if execution_start is not None else None,
+            "trimmed_pre_execution": bool(not include_pre_execution and execution_start is not None),
+            "bar_unit": str(bar.unit),
+            "bar_step": int(bar.step),
+            "analyzer_total_return_pct": (ret_a.get("rtot", 0.0) or 0.0) * 100.0,
+            "analyzer_avg_return_pct": (ret_a.get("ravg", 0.0) or 0.0) * 100.0,
+            "analyzer_max_drawdown_pct": (dd_a.get("max", {}).get("drawdown", None) or 0.0),
+            "analyzer_sharpe_ratio": sh_a.get("sharperatio", None),
         }
 
         turnover_df = pd.DataFrame(
             strat.turnover_history,
             columns=["Date", "TurnoverUSD"],
         ).set_index("Date") if strat.turnover_history else pd.DataFrame(columns=["TurnoverUSD"])
+        if not include_pre_execution and execution_start is not None and not turnover_df.empty:
+            turnover_df = turnover_df.loc[turnover_df.index >= execution_start].copy()
         if not turnover_df.empty and not equity.empty:
             aligned = turnover_df.join(equity[["Equity"]], how="left").ffill()
             turnover_pct = aligned["TurnoverUSD"] / aligned["Equity"].replace(0, np.nan)
@@ -398,27 +506,41 @@ class FinBT:
         ax_tbl.axis("off")
         lines = [
             f"End equity: {metrics['end_value']:,.2f}",
-            f"Total return (analyzer): {metrics['total_return_pct']:.2f}%",
-            f"Avg daily return: {metrics['avg_daily_return_pct']:.4f}%",
+            f"Total return: {metrics['total_return_pct']:.2f}%",
+            f"Avg return per bar: {metrics['avg_daily_return_pct']:.4f}%",
             f"Max drawdown: {metrics['max_drawdown_pct']:.2f}%",
-            f"Sharpe (bt annualized): {metrics['sharpe_ratio']}",
+            f"Sharpe (annualized): {metrics['sharpe_ratio']}",
+            f"Bar spec: {metrics['bar_unit']} x{metrics['bar_step']}",
             f"Avg turnover: {metrics['avg_turnover_pct']:.2f}%",
             f"Top-name gross share: {metrics['top_name_gross_share_pct']:.2f}%",
         ]
+        if metrics["execution_start"] is not None:
+            lines.append(f"Execution start: {metrics['execution_start']}")
         ax_tbl.text(0.02, 0.95, "\n".join(lines), transform=ax_tbl.transAxes, va="top", family="monospace")
 
         plt.tight_layout()
         if show:
             plt.show()
 
+        target_history = list(strat.target_history)
+        group_history = list(strat.group_exposure_history)
+        if not include_pre_execution and execution_start is not None:
+            target_history = [
+                (dt, tg) for dt, tg in target_history if pd.Timestamp(dt) >= execution_start
+            ]
+            group_history = [
+                (dt, ge) for dt, ge in group_history if pd.Timestamp(dt) >= execution_start
+            ]
+
         return {
             "figure": fig,
             "metrics": metrics,
             "equity_curve": equity,
+            "equity_curve_full": equity_full,
             "returns_analysis": ret_a,
             "drawdown_analysis": dd_a,
             "sharpe_analysis": sh_a,
             "turnover_history": turnover_df,
-            "target_history": list(strat.target_history),
-            "group_exposure_history": list(strat.group_exposure_history),
+            "target_history": target_history,
+            "group_exposure_history": group_history,
         }

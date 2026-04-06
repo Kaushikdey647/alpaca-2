@@ -2,6 +2,7 @@ from . import cross_section
 from . import group_ops
 from . import logical
 from . import time_series
+from .alpha_context import AlphaContext, AlphaSeries
 from .decision import DataSource, DecisionContext, resolve_panel_timestamp, validate_panel_timestamp
 from .execution import AlpacaExecutionAdapter, ExecutionReport, OrderAttempt
 from .finbt import FinBT
@@ -19,6 +20,8 @@ from .targets import (
 
 __all__ = [
     "AlpacaExecutionAdapter",
+    "AlphaContext",
+    "AlphaSeries",
     "DataSource",
     "DecisionContext",
     "ExecutionReport",

@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from shunya.algorithm.finstrat import FinStrat
-from shunya.utils import indicators
 
 from tests.conftest import make_stub_fints
 
@@ -19,8 +18,8 @@ def test_pass_market_neutral_sums_to_zero_and_hits_gross():
     for i, (t, d) in enumerate(fts.df.index):
         fts.df.loc[(t, d), "Close"] = 50.0 + float(i)
 
-    def algo(panel: jnp.ndarray) -> jnp.ndarray:
-        return panel[:, 3].astype(jnp.float32)
+    def algo(ctx) -> jnp.ndarray:
+        return ctx.close.latest.astype(jnp.float32)
 
     fs = FinStrat(
         fts,
@@ -28,10 +27,9 @@ def test_pass_market_neutral_sums_to_zero_and_hits_gross():
         neutralization="market",
         decay=0.0,
         truncation=0.0,
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
-    panel, names = fs.panel_at("2020-01-03", live=True)
-    notionals = fs.pass_(panel, 30_000.0, tickers=names)
+    names = fs.tickers_at("2020-01-03")
+    notionals = fs.pass_(None, 30_000.0, tickers=names, execution_date="2020-01-03")
     assert float(np.sum(np.asarray(notionals))) == pytest.approx(0.0, abs=5e-3)
     assert float(np.sum(np.abs(np.asarray(notionals)))) == pytest.approx(30_000.0, rel=1e-4)
 
@@ -52,12 +50,11 @@ def test_group_labels_at_reads_sector_and_industry_columns():
 
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="group",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
-    panel, names = fs.panel_at("2020-01-03", live=True)
+    names = fs.tickers_at("2020-01-03")
     sec = fs.group_labels_at("2020-01-03", names, "Sector")
     ind = fs.group_labels_at("2020-01-03", names, "Industry")
-    assert sec.shape[0] == panel.shape[0]
-    assert ind.shape[0] == panel.shape[0]
+    assert sec.shape[0] == len(names)
+    assert ind.shape[0] == len(names)

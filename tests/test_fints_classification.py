@@ -11,7 +11,8 @@ from shunya.utils import indicators
 
 
 class _StubMarketData:
-    def download(self, ticker_list, start, end):
+    def download(self, ticker_list, start, end, *, bar_spec=None, bar_index_policy=None):
+        del bar_spec, bar_index_policy
         idx = pd.DatetimeIndex([pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")], name="Date")
         frames = {}
         for t in ticker_list:
@@ -52,6 +53,7 @@ def test_fints_attaches_classification_columns(monkeypatch):
         ["AAPL", "XOM"],
         market_data=_StubMarketData(),
         attach_yfinance_classifications=True,
+        feature_mode="ohlcv_only",
     )
     assert {"Sector", "Industry", "SubIndustry"}.issubset(set(fts.df.columns))
     aapl_sector = fts.df.loc[("AAPL", pd.Timestamp("2024-01-02")), "Sector"]
@@ -74,6 +76,7 @@ def test_fints_uses_unknown_fallbacks_when_missing(monkeypatch):
         ["AAPL", "MSFT"],
         market_data=_StubMarketData(),
         attach_yfinance_classifications=True,
+        feature_mode="ohlcv_only",
     )
     assert (
         fts.df.loc[("MSFT", pd.Timestamp("2024-01-03")), "Sector"] == "UnknownSector"
@@ -86,8 +89,8 @@ def test_fints_uses_unknown_fallbacks_when_missing(monkeypatch):
 
 def test_fints_rejects_provider_missing_required_ohlcv_columns():
     class _BadMarketData:
-        def download(self, ticker_list, start, end):
-            del ticker_list, start, end
+        def download(self, ticker_list, start, end, *, bar_spec=None, bar_index_policy=None):
+            del ticker_list, start, end, bar_spec, bar_index_policy
             return pd.DataFrame(
                 {
                     "Open": [100.0],
@@ -106,4 +109,5 @@ def test_fints_rejects_provider_missing_required_ohlcv_columns():
             ["AAPL"],
             market_data=_BadMarketData(),
             attach_yfinance_classifications=False,
+            feature_mode="ohlcv_only",
         )

@@ -9,7 +9,6 @@ import pandas as pd
 
 from shunya.algorithm.finstrat import FinStrat
 from shunya.algorithm.fintrade import FinTrade
-from shunya.utils import indicators
 from tests.conftest import make_stub_fints
 
 
@@ -48,9 +47,8 @@ def _build_fintrade(client):
     fts.df.loc[("BBB", d3), "Close"] = 50.0
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     return FinTrade(fs, trading_client=client, paper=True), fts, d3
 

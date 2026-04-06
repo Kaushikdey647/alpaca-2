@@ -7,6 +7,7 @@ from typing import Sequence, Union
 import pandas as pd
 
 from shunya.data.fints import finTs
+from shunya.data.timeframes import default_bar_index_policy, default_bar_spec
 
 
 def make_stub_fints(
@@ -16,7 +17,7 @@ def make_stub_fints(
     base_price: float = 100.0,
     volume: float = 1e6,
 ) -> finTs:
-    """Minimal ``finTs`` with OHLCV only (use ``panel_columns=STRATEGY_PANEL_OHLCV_ONLY``)."""
+    """Minimal ``finTs`` stub with MultiIndex OHLCV rows only."""
     rows = [(t, pd.Timestamp(d).normalize()) for t in ticker_list for d in dates]
     idx = pd.MultiIndex.from_tuples(rows, names=["Ticker", "Date"])
     n = len(rows)
@@ -36,4 +37,8 @@ def make_stub_fints(
     stub.session = None
     stub.ticker_list = list(ticker_list)
     stub.df = df
+    stub._aligned_calendar = None
+    stub.bar_spec = default_bar_spec()
+    stub._bar_index_policy = default_bar_index_policy()
+    stub._trading_axis_mode = "observed"
     return stub

@@ -1,7 +1,7 @@
 """
 Pluggable market data for :class:`finTs` (research parity and broker-aligned history).
 
-Implement :class:`MarketDataProvider` to swap Yahoo Finance for Alpaca daily bars
+Implement :class:`MarketDataProvider` to swap Yahoo Finance for Alpaca bars
 (or custom feeds) without changing :class:`~shunya.algorithm.finstrat.FinStrat`.
 """
 
@@ -15,7 +15,20 @@ import requests
 import yfinance as yf
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+from .timeframes import (
+    BarIndexPolicy,
+    BarSpec,
+    BarUnit,
+    bar_spec_is_intraday,
+    bar_spec_to_alpaca_timeframe,
+    bar_spec_to_yfinance_interval,
+    default_bar_index_policy,
+    default_bar_spec,
+    normalize_history_index,
+    resample_ohlcv_yearly,
+)
 
 
 @runtime_checkable
@@ -24,7 +37,10 @@ class MarketDataProvider(Protocol):
     Download OHLCV in a ``yfinance``-compatible shape.
 
     Contract:
-    - Index: ``DatetimeIndex`` normalized to date (00:00:00), tz-naive, named ``"Date"``.
+    - Index: ``DatetimeIndex``, named ``"Date"``. Interpretation follows ``bar_index_policy``
+      (default: :func:`~.timeframes.default_bar_index_policy` — NY session clock, naive).
+      Daily-like bars use midnight in the policy timezone (or UTC if ``daily_anchor='utc'``);
+      intraday bars preserve wall clock after conversion to the policy zone.
     - Single ticker: flat OHLCV columns (e.g. ``Open``, ``High``, ``Low``, ``Close``, ``Volume``).
     - Multi ticker: column MultiIndex shaped as ``(Ticker, Field)``.
     """
@@ -34,12 +50,43 @@ class MarketDataProvider(Protocol):
         ticker_list: List[str],
         start: Union[str, pd.Timestamp],
         end: Union[str, pd.Timestamp],
+        *,
+        bar_spec: Optional[BarSpec] = None,
+        bar_index_policy: Optional[BarIndexPolicy] = None,
     ) -> pd.DataFrame:
         """Return raw dataframe: MultiIndex columns per ticker for multi-name, or single-level for one ticker."""
 
 
+def _resample_monthly_ohlcv_to_years(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample monthly OHLCV (single- or multi-ticker yfinance layout) to yearly bars."""
+    if df.empty:
+        out = df.copy()
+        if out.index.name is None:
+            out.index.name = "Date"
+        return out
+    if isinstance(df.columns, pd.MultiIndex):
+        tickers = df.columns.get_level_values(0).unique().tolist()
+        pieces: Dict[str, pd.DataFrame] = {}
+        for t in tickers:
+            sub = df[t].copy()
+            pieces[str(t)] = resample_ohlcv_yearly(sub)
+        out = pd.concat(pieces, axis=1)
+        return out.sort_index()
+    return resample_ohlcv_yearly(df)
+
+
+def _alpaca_request_bounds(
+    start: Union[str, pd.Timestamp], end: Union[str, pd.Timestamp], spec: BarSpec
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    s = pd.Timestamp(start)
+    e = pd.Timestamp(end)
+    if bar_spec_is_intraday(spec):
+        return s, e
+    return s.normalize(), e.normalize()
+
+
 class YFinanceMarketDataProvider:
-    """Default Yahoo Finance path (same as historical ``finTs`` behavior)."""
+    """Yahoo Finance path; ``interval`` derives from :class:`~.timeframes.BarSpec`."""
 
     def __init__(self, session: Optional[requests.Session] = None) -> None:
         self._session = session
@@ -49,22 +96,51 @@ class YFinanceMarketDataProvider:
         ticker_list: List[str],
         start: Union[str, pd.Timestamp],
         end: Union[str, pd.Timestamp],
+        *,
+        bar_spec: Optional[BarSpec] = None,
+        bar_index_policy: Optional[BarIndexPolicy] = None,
     ) -> pd.DataFrame:
-        df = yf.download(
-            ticker_list,
+        spec = bar_spec if bar_spec is not None else default_bar_spec()
+        idx_policy = (
+            bar_index_policy
+            if bar_index_policy is not None
+            else default_bar_index_policy()
+        )
+        if not ticker_list:
+            return pd.DataFrame()
+        yfi_interval = bar_spec_to_yfinance_interval(spec)
+        fetch_interval: str
+        post_year_resample = False
+        month_norm_spec = BarSpec(BarUnit.MONTHS, 1)
+        year_norm_spec = BarSpec(BarUnit.YEARS, 1)
+
+        if yfi_interval == "__monthly_then_year_resample":
+            fetch_interval = "1mo"
+            post_year_resample = True
+        else:
+            fetch_interval = yfi_interval
+
+        dl_kw: dict = dict(
             start=start,
             end=end,
             auto_adjust=True,
             group_by="ticker",
             progress=False,
-            **({"session": self._session} if self._session is not None else {}),
+            interval=fetch_interval,
         )
-        return _normalize_history_index(df)
+        if self._session is not None:
+            dl_kw["session"] = self._session
+
+        df = yf.download(ticker_list, **dl_kw)
+        if post_year_resample:
+            df = _resample_monthly_ohlcv_to_years(df)
+            return normalize_history_index(df, year_norm_spec, policy=idx_policy)
+        return normalize_history_index(df, spec, policy=idx_policy)
 
 
 class AlpacaHistoricalMarketDataProvider:
     """
-    Daily bars from Alpaca Market Data (closer to broker tape than Yahoo for parity checks).
+    Historical stock bars from Alpaca Market Data (closer to broker tape than Yahoo).
 
     Requires ``APCA_API_KEY_ID`` / ``APCA_API_SECRET_KEY`` (or explicit keys). Free-tier
     data may differ by symbol universe; handle API errors at call time.
@@ -93,14 +169,38 @@ class AlpacaHistoricalMarketDataProvider:
         ticker_list: List[str],
         start: Union[str, pd.Timestamp],
         end: Union[str, pd.Timestamp],
+        *,
+        bar_spec: Optional[BarSpec] = None,
+        bar_index_policy: Optional[BarIndexPolicy] = None,
     ) -> pd.DataFrame:
         if not ticker_list:
             return pd.DataFrame()
+
+        spec = bar_spec if bar_spec is not None else default_bar_spec()
+        idx_policy = (
+            bar_index_policy
+            if bar_index_policy is not None
+            else default_bar_index_policy()
+        )
+        tf_mapped = bar_spec_to_alpaca_timeframe(spec)
+        post_year_resample = False
+        request_spec = spec
+        month_norm = BarSpec(BarUnit.MONTHS, 1)
+        year_norm = BarSpec(BarUnit.YEARS, 1)
+
+        if tf_mapped == "__monthly_then_year_resample":
+            timeframe = TimeFrame(1, TimeFrameUnit.Month)
+            post_year_resample = True
+            request_spec = month_norm
+        else:
+            timeframe = tf_mapped
+
+        start_ts, end_ts = _alpaca_request_bounds(start, end, request_spec)
         req = StockBarsRequest(
             symbol_or_symbols=list(ticker_list),
-            timeframe=TimeFrame.Day,
-            start=pd.Timestamp(start).date(),
-            end=pd.Timestamp(end).date(),
+            timeframe=timeframe,
+            start=start_ts.to_pydatetime(),
+            end=end_ts.to_pydatetime(),
         )
         try:
             barset = self._client.get_stock_bars(req)
@@ -109,6 +209,8 @@ class AlpacaHistoricalMarketDataProvider:
                 "Alpaca historical bars request failed. "
                 "Check credentials, symbol permissions, and network/API status."
             ) from exc
+
+        norm_for_piece = month_norm if post_year_resample else spec
         frames: List[pd.DataFrame] = []
         keys: List[str] = []
         for sym in ticker_list:
@@ -129,9 +231,15 @@ class AlpacaHistoricalMarketDataProvider:
                 )
                 idx.append(pd.Timestamp(b.timestamp))
             part = pd.DataFrame(records, index=idx).sort_index()
-            part = _normalize_history_index(part)
+            if post_year_resample:
+                part = normalize_history_index(part, month_norm, policy=idx_policy)
+                part = resample_ohlcv_yearly(part)
+                part = normalize_history_index(part, year_norm, policy=idx_policy)
+            else:
+                part = normalize_history_index(part, norm_for_piece, policy=idx_policy)
             frames.append(part)
             keys.append(sym)
+
         missing = [sym for sym in ticker_list if sym not in keys]
         if missing:
             raise ValueError(
@@ -140,29 +248,10 @@ class AlpacaHistoricalMarketDataProvider:
             )
         if not frames:
             return pd.DataFrame()
-        # Match yfinance multi-ticker layout: column MultiIndex (Ticker, Field).
         if len(frames) == 1 and len(ticker_list) == 1:
-            return _normalize_history_index(frames[0])
+            return frames[0]
         out = pd.concat({k: f for k, f in zip(keys, frames, strict=True)}, axis=1)
-        return _normalize_history_index(out)
-
-
-def _normalize_history_index(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize history index to a stable contract across providers.
-    """
-    if df.empty:
-        out = df.copy()
-        out.index.name = "Date"
         return out
-    idx = pd.DatetimeIndex(pd.to_datetime(df.index))
-    if idx.tz is not None:
-        idx = idx.tz_convert("UTC").tz_localize(None)
-    idx = idx.normalize()
-    out = df.copy()
-    out.index = idx
-    out.index.name = "Date"
-    return out.sort_index()
 
 
 def fetch_yfinance_classifications(

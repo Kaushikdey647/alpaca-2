@@ -10,7 +10,6 @@ import pandas as pd
 from shunya.algorithm.finbt import FinBT
 from shunya.algorithm.finstrat import FinStrat
 from shunya.algorithm.fintrade import FinTrade
-from shunya.utils import indicators
 from tests.conftest import make_stub_fints
 
 
@@ -52,9 +51,8 @@ def test_fintrade_constraints_emit_warnings():
 
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="none",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     ft = FinTrade(fs, trading_client=_mock_client(), paper=True)
     rep = ft.run(
@@ -83,9 +81,8 @@ def test_finbt_accepts_full_constraint_parameters():
             fts.df.loc[(t, d), "Sector"] = "Tech" if t == "AAA" else "Energy"
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="group",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     bt = FinBT(
         fs,

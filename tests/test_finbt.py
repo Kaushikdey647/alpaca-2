@@ -6,13 +6,12 @@ import jax.numpy as jnp
 
 from shunya.algorithm.finbt import FinBT
 from shunya.algorithm.finstrat import FinStrat
-from shunya.utils import indicators
 
 from tests.conftest import make_stub_fints
 
 
-def _close_algo(panel: jnp.ndarray) -> jnp.ndarray:
-    return panel[:, indicators.IX_LIVE.CLOSE].astype(jnp.float32)
+def _close_algo(ctx) -> jnp.ndarray:
+    return ctx.close.latest.astype(jnp.float32)
 
 
 def test_finbt_runs_and_returns_metrics():
@@ -23,7 +22,6 @@ def test_finbt_runs_and_returns_metrics():
         fts,
         _close_algo,
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     bt = FinBT(fs, fts, cash=50_000.0).run()
     out = bt.results(show=False)
@@ -45,9 +43,28 @@ def test_finbt_group_neutralization_defaults_to_sector_column():
         fts,
         _close_algo,
         neutralization="group",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     bt = FinBT(fs, fts, cash=50_000.0).run()
     out = bt.results(show=False)
     assert out["metrics"]["end_value"] > 0.0
     assert "max_group_gross_share_pct" in out["metrics"]
+
+
+def test_finbt_results_trim_pre_execution_by_default() -> None:
+    tickers = ["AAA", "BBB"]
+    dates = ["2020-01-02", "2020-01-03", "2020-01-06"]
+    fts = make_stub_fints(tickers, dates, base_price=100.0)
+
+    fs = FinStrat(
+        fts,
+        _close_algo,
+        neutralization="none",
+        signal_delay=2,
+    )
+    bt = FinBT(fs, fts, cash=50_000.0).run()
+    out_trim = bt.results(show=False)
+    out_full = bt.results(show=False, include_pre_execution=True)
+
+    assert len(out_full["equity_curve"]) >= len(out_trim["equity_curve"])
+    assert out_trim["metrics"]["execution_start"] is not None
+    assert bool(out_trim["metrics"]["trimmed_pre_execution"]) is True

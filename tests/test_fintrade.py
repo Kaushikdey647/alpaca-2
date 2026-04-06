@@ -12,7 +12,6 @@ from shunya.algorithm.decision import DecisionContext
 from shunya.algorithm.execution import ExecutionReport
 from shunya.algorithm.finstrat import FinStrat
 from shunya.algorithm.fintrade import FinTrade
-from shunya.utils import indicators
 
 from tests.conftest import make_stub_fints
 
@@ -53,14 +52,13 @@ def test_fintrade_dry_run_returns_execution_report():
     fts.df.loc[("AAA", d3), "Close"] = 110.0
     fts.df.loc[("BBB", d3), "Close"] = 90.0
 
-    def algo(panel: jnp.ndarray) -> jnp.ndarray:
-        return panel[:, 3].astype(jnp.float32)
+    def algo(ctx) -> jnp.ndarray:
+        return ctx.close.latest.astype(jnp.float32)
 
     fs = FinStrat(
         fts,
         algo,
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     client = _mock_trading_client()
     ft = FinTrade(fs, trading_client=client, paper=True)
@@ -83,14 +81,13 @@ def test_fintrade_submits_when_not_dry_run():
     fts.df.loc[("AAA", d3), "Close"] = 200.0
     fts.df.loc[("BBB", d3), "Close"] = 50.0
 
-    def algo(panel: jnp.ndarray) -> jnp.ndarray:
-        return panel[:, 3].astype(jnp.float32)
+    def algo(ctx) -> jnp.ndarray:
+        return ctx.close.latest.astype(jnp.float32)
 
     fs = FinStrat(
         fts,
         algo,
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     client = _mock_trading_client()
     ft = FinTrade(fs, trading_client=client, paper=True)
@@ -116,9 +113,8 @@ def test_require_market_open_raises_when_closed():
     fts = make_stub_fints(tickers, dates)
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     client = _mock_trading_client()
     client.get_clock.return_value.is_open = False
@@ -144,14 +140,13 @@ def test_fintrade_sector_gross_cap_adds_warning_and_rescales():
     fts.df.loc[("AAA", d3), "Sector"] = "Tech"
     fts.df.loc[("BBB", d3), "Sector"] = "Tech"
 
-    def algo(panel: jnp.ndarray) -> jnp.ndarray:
-        return panel[:, 3].astype(jnp.float32)
+    def algo(ctx) -> jnp.ndarray:
+        return ctx.close.latest.astype(jnp.float32)
 
     fs = FinStrat(
         fts,
         algo,
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     client = _mock_trading_client()
     ft = FinTrade(fs, trading_client=client, paper=True)
@@ -178,9 +173,8 @@ def test_fintrade_reconciliation_retry_once_places_remediation_orders():
     client.get_all_positions.side_effect = [[], []]
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     ft = FinTrade(fs, trading_client=client, paper=True)
     rep = ft.run(
@@ -205,9 +199,8 @@ def test_fintrade_decision_guard_rejects_weekend_as_of():
     fts = make_stub_fints(tickers, dates, base_price=100.0)
     fs = FinStrat(
         fts,
-        lambda p: p[:, 3].astype(jnp.float32),
+        lambda ctx: ctx.close.latest.astype(jnp.float32),
         neutralization="market",
-        panel_columns=indicators.STRATEGY_PANEL_OHLCV_ONLY,
     )
     client = _mock_trading_client()
     ft = FinTrade(fs, trading_client=client, paper=True)

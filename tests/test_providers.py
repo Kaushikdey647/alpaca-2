@@ -10,6 +10,7 @@ from shunya.data.providers import (
     AlpacaHistoricalMarketDataProvider,
     YFinanceMarketDataProvider,
 )
+from shunya.data.timeframes import BarIndexPolicy, BarSpec, BarUnit
 
 
 @dataclass
@@ -175,3 +176,39 @@ def test_yfinance_provider_normalizes_index(monkeypatch):
     assert out.index.name == "Date"
     assert out.index.tz is None
     assert out.index[0] == pd.Timestamp("2024-01-02")
+
+
+def test_yfinance_provider_intraday_preserves_time_and_sets_interval(monkeypatch):
+    seen: dict = {}
+
+    def _fake_download_tickers(tickers, *args, **kwargs):
+        seen["interval"] = kwargs.get("interval")
+        del tickers, args
+        idx = pd.DatetimeIndex([pd.Timestamp("2024-01-02 14:30:00+00:00")])
+        return pd.DataFrame(
+            {
+                "Open": [10.0],
+                "High": [11.0],
+                "Low": [9.0],
+                "Close": [10.5],
+                "Volume": [100.0],
+            },
+            index=idx,
+        )
+
+    monkeypatch.setattr("shunya.data.providers.yf.download", _fake_download_tickers)
+    p = YFinanceMarketDataProvider()
+    out = p.download(
+        ["AAPL"], "2024-01-01", "2024-01-10", bar_spec=BarSpec(BarUnit.MINUTES, 5)
+    )
+    assert seen["interval"] == "5m"
+    assert out.index[0] == pd.Timestamp("2024-01-02 09:30:00")
+
+    out_utc = p.download(
+        ["AAPL"],
+        "2024-01-01",
+        "2024-01-10",
+        bar_spec=BarSpec(BarUnit.MINUTES, 5),
+        bar_index_policy=BarIndexPolicy(timezone="UTC"),
+    )
+    assert out_utc.index[0] == pd.Timestamp("2024-01-02 14:30:00")

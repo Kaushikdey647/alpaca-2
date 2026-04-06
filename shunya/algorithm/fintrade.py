@@ -182,7 +182,9 @@ class FinTrade:
         if require_market_open and not dry_run:
             self._adapter.assert_market_open()
 
-        panel, names = self._strat.panel_at(dt, live=True)
+        names = self._strat.tickers_at(dt)
+        if not names:
+            raise ValueError(f"No tradable tickers with finite OHLCV at {dt!s}")
 
         pass_kw: dict = {"tickers": names}
         if self._strat.neutralization == "group":
@@ -208,7 +210,7 @@ class FinTrade:
                 warnings.append("buying_power_unavailable")
 
         targets_vec = np.asarray(
-            jnp.asarray(self._strat.pass_(panel, eff_cap, **pass_kw)),
+            jnp.asarray(self._strat.pass_(None, eff_cap, execution_date=dt, **pass_kw)),
             dtype=float,
         )
         targets = target_usd_universe(names, targets_vec, fin_ts.ticker_list)

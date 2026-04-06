@@ -16,7 +16,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture details, extension pat
 | Package | Role |
 |--------|------|
 | `shunya.data` | `finTs` — download OHLCV, build MultiIndex `(Ticker, Date)` frame, attach engineered columns |
-| `shunya.algorithm` | `FinStrat` (alpha pipeline), `FinBT` (backtrader), `FinTrade` (Alpaca live/paper orders), `cross_section` (rank, zscore, winsorize, neutralization) |
+| `shunya.algorithm` | `FinStrat` (context-based alpha pipeline), `FinBT` (backtrader), `FinTrade` (Alpaca live/paper orders), `cross_section` (rank, zscore, winsorize, neutralization) |
 | `shunya.utils` | `indicators` — column namespaces (`COL`, `IX`, `IX_LIVE`), strategy feature lists, helpers |
 
 Common imports from `shunya` (illustrative):
@@ -39,12 +39,16 @@ The canonical set of symbols re-exported at the package root is `__all__` in [`s
 
 1. **`finTs`** loads one or many tickers and produces a dataframe whose live columns include raw **Open / High / Low / Close / Volume** first, then indicators (`VWAP`, `SMA_50`, `RSI_14`, …). It also attaches best-effort yfinance classification columns: **`Sector`**, **`Industry`**, **`SubIndustry`** (with deterministic `Unknown*` fallbacks). See `indicators.STRATEGY_FEATURES_LIVE` for the full default ordering.
 
-2. **`FinStrat(fin_ts, algorithm, ...)`** binds the panel to a JAX callable `algorithm(panel) -> (n_stocks,)`. Optional BRAIN-like knobs:
+2. **`FinStrat(fin_ts, algorithm, ...)`** binds the panel to a context callable `algorithm(ctx) -> (n_stocks,)`, where `ctx` exposes:
+   - base series: `ctx.open`, `ctx.high`, `ctx.low`, `ctx.close`, `ctx.adj_volume`
+   - time-series operators: `ctx.ts.*` (for example, `ctx.ts.mean(ctx.close, 50)`)
+   - cross-sectional operators: `ctx.cs.*` (for example, `ctx.cs.rank(signal)`)
+
+   Optional BRAIN-like knobs:
    - `decay` (per-name EMA on raw scores — pass `tickers=` into `pass_`)
    - `truncation` (cross-sectional winsorize)
    - `neutralization`: `"market"`, `"none"`, or `"group"` (with `group_ids`, often from `Sector`/`Industry`/`SubIndustry`)
-   - `max_single_weight`, `jit_algorithm`
-   - **`panel_columns`** — restrict which columns `panel_at` loads (e.g. `indicators.STRATEGY_PANEL_OHLCV_ONLY`) so OHLC-only alphas trade from the first bar instead of waiting on `SMA_200` warm-up
+   - `max_single_weight`
 
 3. **`FinBT(fin_strat, fin_ts, ...)`** runs the same `FinStrat` on the same `fin_ts` instance in backtrader, rebalancing to `pass_` dollar targets each bar. `run()` resets `FinStrat` decay state. Pass **`commission`** (broker rate) and optional **`slippage_pct`** (adverse percent via backtrader’s `set_slippage_perc`). For `neutralization="group"`, `group_column` defaults to `"Sector"` (or set `"Industry"` / `"SubIndustry"`). `broker_deltas` / `target_usd_universe` in `shunya.algorithm.targets` mirror how live orders diff targets vs positions.
 
@@ -57,6 +61,14 @@ The canonical set of symbols re-exported at the package root is `__all__` in [`s
    - `AlpacaHistoricalMarketDataProvider` is strict: if requested symbols are missing bars, it raises a `ValueError` listing those symbols.
 
 7. **`cross_section`** — JIT-friendly helpers: `rank`, `zscore`, `scale`, `sign`, `winsorize`, `neutralize_market`, `neutralize_groups`. `rank(x)` is increasing in `x` (smallest → ~0, largest → ~1); use `rank(-x)` to flip.
+
+## Trading-time axis (minute/hour/day)
+
+- `finTs(..., trading_axis_mode="observed")` keeps legacy behavior (calendar derived from observed panel rows).
+- `finTs(..., trading_axis_mode="canonical")` builds a canonical US-equities trading calendar for the selected `BarSpec` (weekend gaps removed from bar progression).
+- `strict_trading_grid=True` enforces provider timestamps lie on the canonical bar grid and have no in-session holes.
+- `FinStrat(..., temporal_mode="bar_step")` advances decay one step per bar.
+- `FinStrat(..., temporal_mode="elapsed_trading_time")` advances decay by trading-time distance; `FinBT` and `FinTrade` pass execution timestamps so this mode works out of the box.
 
 ## Operator helpers
 
@@ -91,14 +103,13 @@ uv run pytest
 ```python
 import jax.numpy as jnp
 from shunya import FinBT, FinStrat, finTs
-from shunya.utils import indicators as ind
 
 fts = finTs("2023-01-01", "2024-01-01", ["AAPL", "MSFT", "NVDA"])
 
-def alpha(panel: jnp.ndarray) -> jnp.ndarray:
-    close = panel[:, ind.IX_LIVE.CLOSE]
-    vol = panel[:, ind.IX_LIVE.VOLUME]
-    return jnp.log1p(vol) * close
+def alpha(ctx) -> jnp.ndarray:
+    sma_50 = ctx.ts.mean(ctx.close, 50)
+    signal = ctx.close / sma_50
+    return ctx.cs.rank(signal)
 
 fs = FinStrat(
     fts,
@@ -198,7 +209,7 @@ uv sync
 
 ## Note on live data
 
-`indicators` defines a lookahead column `Future_1d_Ret`; for real-time style panels use `panel_at(..., live=True)` and `IX_LIVE` / `STRATEGY_FEATURES_LIVE` so that column is excluded.
+`indicators` defines a lookahead column `Future_1d_Ret`. `FinStrat` context execution uses live OHLCV history and excludes lookahead fields by design.
 
 ## Risks: Yahoo vs Alpaca, margin, paper vs live
 
