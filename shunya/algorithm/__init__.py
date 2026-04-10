@@ -8,8 +8,10 @@ from .execution import AlpacaExecutionAdapter, ExecutionReport, OrderAttempt
 from .finbt import FinBT
 from .finstrat import FinStrat
 from .fintrade import FinTrade
+from .order_manager import ManagedOrderBatch, OrderManager
 from .orders import (
     ExecutionAdapter,
+    OpenOrderView,
     OrderBuilder,
     OrderSide,
     OrderSpec,
@@ -17,6 +19,8 @@ from .orders import (
     OrderVariety,
     RiskPolicy,
 )
+from .streaming_context import StreamingContextBuilder
+from .streaming_runner import StreamingDecision, StreamingRunner
 from .targets import (
     apply_group_gross_cap,
     apply_group_net_cap,
@@ -44,6 +48,9 @@ __all__ = [
     "FinStrat",
     "FinTrade",
     "KiteExecutionAdapter",
+    "ManagedOrderBatch",
+    "OpenOrderView",
+    "OrderManager",
     "OrderAttempt",
     "OrderBuilder",
     "OrderSide",
@@ -51,6 +58,9 @@ __all__ = [
     "OrderType",
     "OrderVariety",
     "RiskPolicy",
+    "StreamingContextBuilder",
+    "StreamingDecision",
+    "StreamingRunner",
     "apply_group_gross_cap",
     "apply_group_net_cap",
     "apply_slippage_to_fill_price",

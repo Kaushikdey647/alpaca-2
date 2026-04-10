@@ -195,6 +195,34 @@ class TestCancelOpenOrders:
         kite.exit_order.assert_called_once_with(variety="co", order_id="o2")
 
 
+class TestListOpenOrders:
+    def test_returns_only_non_terminal_orders(self):
+        kite = _mock_kite()
+        kite.orders.return_value = [
+            {
+                "order_id": "o1",
+                "tradingsymbol": "INFY",
+                "transaction_type": "BUY",
+                "status": "OPEN",
+                "quantity": 10,
+                "price": 1500.0,
+                "tag": "cid-1",
+            },
+            {
+                "order_id": "o2",
+                "tradingsymbol": "TCS",
+                "transaction_type": "SELL",
+                "status": "COMPLETE",
+            },
+        ]
+        adapter = KiteExecutionAdapter(kite)
+        out = adapter.list_open_orders()
+        assert len(out) == 1
+        assert out[0].symbol == "INFY"
+        assert out[0].status == "OPEN"
+        assert out[0].notional == 15000.0
+
+
 class TestTriggerRangeValidation:
     def test_warns_when_trigger_outside_range(self):
         kite = _mock_kite()

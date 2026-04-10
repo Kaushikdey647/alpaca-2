@@ -14,7 +14,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.models import Order
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
-from .orders import OrderSpec, OrderType
+from .orders import OpenOrderView, OrderSpec, OrderType
 from .orders import OrderSide as SpecSide
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,65 @@ class AlpacaExecutionAdapter:
     def cancel_open_orders(self) -> None:
         """Best-effort open-order cancellation."""
         self._client.cancel_orders()
+
+    def list_open_orders(self) -> List[OpenOrderView]:
+        """Best-effort broker-neutral snapshot of currently open Alpaca orders."""
+        terminal_statuses = {
+            "filled",
+            "canceled",
+            "cancelled",
+            "expired",
+            "rejected",
+            "done_for_day",
+            "stopped",
+            "suspended",
+        }
+        out: List[OpenOrderView] = []
+        try:
+            orders = self._client.get_orders()
+        except Exception as e:
+            logger.warning("Could not fetch Alpaca open orders: %s", e)
+            return out
+
+        for order in orders:
+            oid = getattr(order, "id", None)
+            sym = getattr(order, "symbol", None)
+            if oid is None or sym is None:
+                continue
+            status = getattr(order, "status", None)
+            status_s = str(status) if status is not None else None
+            if status_s is not None and status_s.lower() in terminal_statuses:
+                continue
+            notional = getattr(order, "notional", None)
+            qty = getattr(order, "qty", None)
+            limit_price = getattr(order, "limit_price", None)
+            view_notional: Optional[float] = None
+            try:
+                if notional is not None:
+                    view_notional = float(notional)
+                elif qty is not None and limit_price is not None:
+                    view_notional = float(qty) * float(limit_price)
+            except Exception:
+                view_notional = None
+            out.append(
+                OpenOrderView(
+                    symbol=str(sym),
+                    order_id=str(oid),
+                    client_order_id=(
+                        str(getattr(order, "client_order_id", ""))
+                        if getattr(order, "client_order_id", None) is not None
+                        else None
+                    ),
+                    side=(
+                        str(getattr(order, "side", ""))
+                        if getattr(order, "side", None) is not None
+                        else None
+                    ),
+                    status=status_s,
+                    notional=view_notional,
+                )
+            )
+        return out
 
     # --- ExecutionAdapter protocol methods ---
 

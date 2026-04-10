@@ -7,7 +7,7 @@
 [![Data](https://img.shields.io/badge/data-yfinance-informational.svg)](https://pypi.org/project/yfinance/)
 [![Broker](https://img.shields.io/badge/broker-alpaca--py-orange.svg)](https://github.com/alpacahq/alpaca-py)
 
-Small Python stack for **multi-ticker equity panels**, **JAX alpha functions** (WorldQuant BRAIN-style processing), and **backtrader** backtests. Historical data is provider-driven (`yfinance` by default, optional Alpaca bars); features include OHLCV plus technicals from `finta`.
+Small Python stack for **multi-ticker equity panels**, **JAX alpha functions** (WorldQuant BRAIN-style processing), **backtrader** backtests, and an early **tick-to-trade streaming foundation**. Historical data is provider-driven (`yfinance` by default, optional Alpaca bars); features include OHLCV plus technicals from `finta`.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture details, extension patterns, and coding guidelines.
 
@@ -17,6 +17,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture details, extension pat
 |--------|------|
 | `shunya.data` | `finTs` — download OHLCV, build MultiIndex `(Ticker, Date)` frame, attach engineered columns |
 | `shunya.algorithm` | `FinStrat` (context-based alpha pipeline), `FinBT` (backtrader), `FinTrade` (Alpaca live/paper orders), `cross_section` (rank, zscore, winsorize, neutralization) |
+| `shunya.streaming` | Event/tick plumbing for Alpaca-style streaming: normalized market events, per-symbol FIFO buffers, micro-bar aggregation, universe/subscription helpers, and rectangular snapshots for alpha evaluation |
 | `shunya.utils` | `indicators` — column namespaces (`COL`, `IX`, `IX_LIVE`), strategy feature lists, helpers |
 
 Common imports from `shunya` (illustrative):
@@ -33,7 +34,7 @@ from shunya import (
 )
 ```
 
-The canonical set of symbols re-exported at the package root is `__all__` in [`shunya/__init__.py`](shunya/__init__.py) (e.g. `PanelQADiagnostics`, `YFinanceMarketDataProvider`, target helpers, `logical`, `time_series`, `group_ops`, timestamp helpers). `OrderAttempt` is part of `shunya.algorithm` only: `from shunya.algorithm import OrderAttempt`.
+The canonical set of symbols re-exported at the package root is `__all__` in [`shunya/__init__.py`](shunya/__init__.py) (for example `PanelQADiagnostics`, `YFinanceMarketDataProvider`, `StreamingRunner`, `OrderManager`, target helpers, `logical`, `time_series`, and timestamp helpers).
 
 ## Core ideas
 
@@ -54,13 +55,18 @@ The canonical set of symbols re-exported at the package root is `__all__` in [`s
 
 4. **`FinTrade(fin_strat, ...)`** uses the Alpaca Trading API (`alpaca-py`): `run(tradecapital, fin_ts)` builds the panel (latest date by default), runs `pass_`, diffs targets vs open positions, and submits **market DAY** orders by **notional**. Set `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY`, or pass `api_key` / `secret_key`. `dry_run=True` still fetches positions but does not submit. Temporal `decay` state is **not** reset between `run` calls (unlike `FinBT.run`). For `neutralization="group"`, `group_column` defaults to `"Sector"` (or set `"Industry"` / `"SubIndustry"`). Optional controls include sector gross/net caps, turnover budget, ADV participation caps, and post-submit reconciliation policies. The return value is an `ExecutionReport` dataclass; use `ExecutionReport.as_dict()` if you need a JSON-serializable summary.
 
-5. **`DecisionContext`** (`shunya.algorithm.decision`) pins **signal time** and **data provenance** (`yfinance_research` vs `alpaca_bars`) so live logic does not silently mix “Yahoo’s last bar” with “submit now.”  Pass `decision=DecisionContext(as_of=..., data_source=...)` into `FinTrade.run`, or set `as_of=` explicitly; otherwise the last date in the panel index is used.
+5. **Streaming tick-to-trade foundation** lives beside the batch panel flow:
+   - `shunya.streaming` provides `MarketEvent`, `SymbolRingBuffer`, `StreamingState`, `MicroBarAggregator`, `SnapshotBuilder`, `SubscriptionManager`, `UniverseSelector`, and `AlpacaStreamClient`.
+   - `StreamingRunner` + `StreamingContextBuilder` let you materialize streaming micro-bars into the same `(time, n_tickers)` alpha context shape used by `FinStrat`.
+   - `OrderManager` is a stateful OMS helper for streaming target updates: it caches positions/open orders, suppresses duplicate submits while orders are working, and can route either through `submit_delta_orders` or explicit `OrderSpec` generation via `RiskPolicy`.
 
-6. **`MarketDataProvider`** (`shunya.data.providers`) abstracts history loading: default `YFinanceMarketDataProvider` in `finTs`, optional `AlpacaHistoricalMarketDataProvider` for broker-aligned panels and parity checks vs Yahoo.
+6. **`DecisionContext`** (`shunya.algorithm.decision`) pins **signal time** and **data provenance** (`yfinance_research` vs `alpaca_bars`) so live logic does not silently mix “Yahoo’s last bar” with “submit now.”  Pass `decision=DecisionContext(as_of=..., data_source=...)` into `FinTrade.run`, or set `as_of=` explicitly; otherwise the last date in the panel index is used.
+
+7. **`MarketDataProvider`** (`shunya.data.providers`) abstracts history loading: default `YFinanceMarketDataProvider` in `finTs`, optional `AlpacaHistoricalMarketDataProvider` for broker-aligned panels and parity checks vs Yahoo.
    - Provider output contract is consistent: `DatetimeIndex` named `Date`, normalized to daily granularity.
    - `AlpacaHistoricalMarketDataProvider` is strict: if requested symbols are missing bars, it raises a `ValueError` listing those symbols.
 
-7. **`cross_section`** — JIT-friendly helpers: `rank`, `zscore`, `scale`, `sign`, `winsorize`, `neutralize_market`, `neutralize_groups`. `rank(x)` is increasing in `x` (smallest → ~0, largest → ~1); use `rank(-x)` to flip.
+8. **`cross_section`** — JIT-friendly helpers: `rank`, `zscore`, `scale`, `sign`, `winsorize`, `neutralize_market`, `neutralize_groups`. `rank(x)` is increasing in `x` (smallest → ~0, largest → ~1); use `rank(-x)` to flip.
 
 ## Trading-time axis (minute/hour/day)
 
@@ -151,6 +157,46 @@ fts = finTs(
 decision = DecisionContext(data_source="alpaca_bars")
 ```
 
+### Streaming tick-to-trade foundation
+
+The streaming path is intentionally separate from `finTs` / `FinTrade` batch orchestration.
+It reuses `FinStrat` math and the broker execution adapters, but drives them from
+streaming market events instead of a prebuilt panel.
+
+```python
+from shunya import FinStrat
+from shunya.algorithm import OrderManager, StreamingRunner
+from shunya.streaming import trade_event
+
+runner = StreamingRunner(
+    fin_strat=fs,
+    order_manager=OrderManager(execution_adapter=adapter, min_order_notional=1.0),
+    lookback=32,
+    bar_interval="1s",
+    max_concurrent_symbols=16,
+)
+runner.set_target_universe(["AAPL", "MSFT", "NVDA"])
+
+runner.on_event(trade_event("AAPL", "2024-01-01 09:30:00.100", 190.25), capital=100_000.0)
+runner.on_event(trade_event("MSFT", "2024-01-01 09:30:00.200", 402.10), capital=100_000.0)
+decision = runner.on_event(
+    trade_event("AAPL", "2024-01-01 09:30:01.100", 190.40),
+    capital=100_000.0,
+    dry_run=True,
+)
+```
+
+The main streaming building blocks are:
+
+- `AlpacaStreamClient`: lazy wrapper around Alpaca stock live data subscriptions
+- `MarketEvent`: normalized trade/quote event shape
+- `SymbolRingBuffer` / `StreamingState`: per-symbol FIFO event storage
+- `MicroBarAggregator`: converts asynchronous events into short rolling bars
+- `SnapshotBuilder`: builds rectangular `(time, n_tickers)` snapshots
+- `StreamingContextBuilder`: turns streaming snapshots into regular `AlphaContext`
+- `StreamingRunner`: computes targets from streaming snapshots with `FinStrat`
+- `OrderManager`: stateful OMS helper for duplicate suppression and in-flight awareness
+
 ## Notebooks
 
 - [`vwap_close_rank_backtest_yfinance.ipynb`](vwap_close_rank_backtest_yfinance.ipynb) — `finTs` (default `YFinanceMarketDataProvider`) → `FinStrat` (`rank(VWAP/Close)`) → `FinBT`.
@@ -217,6 +263,13 @@ uv sync
 - **Shorting and margin:** Negative target notionals imply shorts. Alpaca requires margin, borrow availability, and `shortable` assets; orders can reject if the account is cash-only or the name is not shortable. The execution layer warns on non-shortable names but does not guarantee borrow.
 - **Paper vs live checklist:** Confirm `paper=True`/`False` on `TradingClient`, that keys are scoped and never committed to git, use `dry_run=True` for rehearsal, set `require_market_open=True` when you must avoid after-hours submits, and read `ExecutionReport.warnings` (buying-power cap, Yahoo parity note, etc.) on every run.
 
+## What Is Not There Yet
+
+- The streaming layer is **Alpaca-only** today. There is no `KiteTicker` / Zerodha websocket client in `shunya.streaming`.
+- `StreamingRunner` reuses `FinStrat` processing and broker adapters, but it does **not** inherit the full `FinTrade.run(...)` contract automatically. Decision-time guards, `DecisionContext`, reconciliation policy handling, sector/net/turnover/ADV controls, and post-submit remediation remain documented on the batch `FinTrade` path.
+- There is no built-in daemon/service runner, persisted event log, or replay CLI for streaming sessions yet.
+- The streaming docs currently live in this README only; `CONTRIBUTING.md` and the alpha examples are still centered on the historical panel / batch execution path.
+
 ## Development tests
 
 ```bash
@@ -233,6 +286,7 @@ Build with `uv build` (wheel and sdist). Upload with [Twine](https://twine.readt
 - P0 completed: yfinance classifications, group defaults, order-status observation, sector gross cap.
 - P1 completed: decision/session guards, panel QA diagnostics, richer backtest diagnostics.
 - P2 completed: reconciliation loop + remediation hooks, net/turnover/ADV constraints, integration tests.
+- P3 in progress: tick-to-trade foundation (`shunya.streaming`, `StreamingRunner`, `OrderManager`, open-order adapter snapshots).
 
 ## Documentation
 

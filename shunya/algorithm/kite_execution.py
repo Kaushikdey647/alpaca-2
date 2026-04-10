@@ -16,7 +16,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from .execution import OrderAttempt
-from .orders import ExecutionAdapter, OrderSide, OrderSpec, OrderType, OrderVariety
+from .orders import ExecutionAdapter, OpenOrderView, OrderSide, OrderSpec, OrderType, OrderVariety
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +276,51 @@ class KiteExecutionAdapter:
                     self._kite.cancel_order(variety=variety, order_id=oid)
             except Exception as e:
                 logger.warning("Failed to cancel Kite order %s: %s", oid, e)
+
+    def list_open_orders(self) -> List[OpenOrderView]:
+        """Best-effort broker-neutral snapshot of currently open Kite orders."""
+        try:
+            orders = self._kite.orders()
+        except Exception as e:
+            logger.warning("Could not fetch Kite open orders: %s", e)
+            return []
+
+        out: List[OpenOrderView] = []
+        for order in orders:
+            status = str(order.get("status", ""))
+            if status.upper() in _TERMINAL_STATUSES:
+                continue
+            order_id = order.get("order_id")
+            symbol = order.get("tradingsymbol")
+            if order_id is None or symbol is None:
+                continue
+            notional: Optional[float] = None
+            try:
+                qty = order.get("quantity")
+                price = order.get("price") or order.get("average_price")
+                if qty is not None and price is not None:
+                    notional = float(qty) * float(price)
+            except Exception:
+                notional = None
+            out.append(
+                OpenOrderView(
+                    symbol=str(symbol),
+                    order_id=str(order_id),
+                    client_order_id=(
+                        str(order.get("tag"))
+                        if order.get("tag") not in (None, "")
+                        else None
+                    ),
+                    side=(
+                        str(order.get("transaction_type"))
+                        if order.get("transaction_type") not in (None, "")
+                        else None
+                    ),
+                    status=status,
+                    notional=notional,
+                )
+            )
+        return out
 
     def _validate_trigger_range(
         self,

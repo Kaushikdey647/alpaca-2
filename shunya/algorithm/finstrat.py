@@ -432,6 +432,10 @@ class FinStrat:
         Execute the context-based alpha and return cross-sectional raw scores.
         """
         ctx = self.context_at(execution_date, tickers=tickers)
+        return self.scores_from_context(ctx)
+
+    def scores_from_context(self, ctx: AlphaContext) -> jnp.ndarray:
+        """Execute the alpha on an already materialized :class:`AlphaContext`."""
         try:
             raw: Any = self._algorithm(ctx)
         except TypeError as exc:
@@ -527,37 +531,30 @@ class FinStrat:
             notionals, jnp.asarray(capital, dtype=notionals.dtype), lim
         )
 
-    def pass_(
+    def process_raw_scores(
         self,
-        daily_indicators: Optional[jnp.ndarray],
+        raw_scores: Union[jnp.ndarray, np.ndarray, Sequence[float]],
         capital: Union[float, jnp.ndarray],
         *,
-        tickers: Optional[Sequence[str]] = None,
+        tickers: Sequence[str],
+        execution_date: Union[str, pd.Timestamp],
         group_ids: Optional[Union[jnp.ndarray, Sequence[object]]] = None,
-        execution_date: Optional[Union[str, pd.Timestamp]] = None,
     ) -> jnp.ndarray:
         """
-        Run the pipeline and return dollar notionals whose gross sum equals ``capital``
-        when dispersion is non-zero (after neutralization), unless caps zero everyone
-        out.
+        Apply the post-alpha pipeline to precomputed raw cross-sectional scores.
 
-        Args:
-            daily_indicators: Legacy panel argument (must be ``None`` in context mode).
-            capital: Target gross booksize.
-            tickers: Ticker strings, same order as panel rows. **Required** if
-                temporal decay is enabled, and for context-based alpha execution.
-            group_ids: Same length as rows; required if ``neutralization == 'group'``.
+        This is the reusable seam for non-`finTs` runners such as streaming or replay
+        engines that can already materialize an :class:`AlphaContext`.
         """
-        if daily_indicators is not None:
+        raw = jnp.asarray(raw_scores, dtype=jnp.float32)
+        if raw.ndim == 2:
+            raw = raw[-1, :]
+        if raw.ndim != 1:
             raise ValueError(
-                "pass_(daily_indicators=...) was removed. Pass None and provide "
-                "execution_date + tickers for context-based alpha execution."
+                f"raw_scores must be a 1D cross-section (or 2D history), got shape {raw.shape}"
             )
-        if tickers is None:
-            raise ValueError("tickers is required for context-based alpha execution")
-        if execution_date is None:
-            raise ValueError("execution_date is required for context-based alpha execution")
-        raw = self.scores_at(execution_date, tickers=tickers)
+        if int(raw.shape[0]) != len(tickers):
+            raise ValueError("tickers length must match number of raw scores")
 
         if self._nan_policy == "strict":
             if not bool(jnp.all(jnp.isfinite(raw))):
@@ -610,3 +607,42 @@ class FinStrat:
         cap = jnp.asarray(capital, dtype=s.dtype)
         notionals = self._scale_gross(s, cap)
         return self._apply_max_weight_rescale(notionals, cap)
+
+    def pass_(
+        self,
+        daily_indicators: Optional[jnp.ndarray],
+        capital: Union[float, jnp.ndarray],
+        *,
+        tickers: Optional[Sequence[str]] = None,
+        group_ids: Optional[Union[jnp.ndarray, Sequence[object]]] = None,
+        execution_date: Optional[Union[str, pd.Timestamp]] = None,
+    ) -> jnp.ndarray:
+        """
+        Run the pipeline and return dollar notionals whose gross sum equals ``capital``
+        when dispersion is non-zero (after neutralization), unless caps zero everyone
+        out.
+
+        Args:
+            daily_indicators: Legacy panel argument (must be ``None`` in context mode).
+            capital: Target gross booksize.
+            tickers: Ticker strings, same order as panel rows. **Required** if
+                temporal decay is enabled, and for context-based alpha execution.
+            group_ids: Same length as rows; required if ``neutralization == 'group'``.
+        """
+        if daily_indicators is not None:
+            raise ValueError(
+                "pass_(daily_indicators=...) was removed. Pass None and provide "
+                "execution_date + tickers for context-based alpha execution."
+            )
+        if tickers is None:
+            raise ValueError("tickers is required for context-based alpha execution")
+        if execution_date is None:
+            raise ValueError("execution_date is required for context-based alpha execution")
+        raw = self.scores_at(execution_date, tickers=tickers)
+        return self.process_raw_scores(
+            raw,
+            capital,
+            tickers=tickers,
+            execution_date=execution_date,
+            group_ids=group_ids,
+        )

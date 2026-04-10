@@ -37,7 +37,13 @@ class OrderSide(Enum):
 
 @dataclass(frozen=True)
 class OrderSpec:
-    """Broker-neutral order specification built by :class:`OrderBuilder`."""
+    """
+    Broker-neutral order specification built by :class:`OrderBuilder`.
+
+    ``quantity`` is the executable share / lot count for brokers that require integer
+    sizing (for example Kite). ``notional`` remains useful for brokers that support
+    notional or fractional order entry (for example Alpaca market orders).
+    """
 
     symbol: str
     side: OrderSide
@@ -56,6 +62,18 @@ class OrderSpec:
     iceberg_legs: Optional[int] = None
     iceberg_quantity: Optional[int] = None
     market_protection: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class OpenOrderView:
+    """Broker-neutral snapshot of an in-flight order."""
+
+    symbol: str
+    order_id: str
+    client_order_id: Optional[str] = None
+    side: Optional[str] = None
+    status: Optional[str] = None
+    notional: Optional[float] = None
 
 
 @dataclass
@@ -236,3 +254,5 @@ class ExecutionAdapter(Protocol):
     def buying_power(self) -> float: ...
 
     def cancel_open_orders(self) -> None: ...
+
+    def list_open_orders(self) -> List[OpenOrderView]: ...

@@ -6,6 +6,22 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Tick-to-trade streaming foundation under `shunya.streaming`:
+  - `MarketEvent`, `trade_event(...)`, `quote_event(...)`
+  - `SymbolRingBuffer` and `StreamingState` for per-symbol FIFO event storage
+  - `MicroBarAggregator`, `SnapshotBuilder`, and `StreamingSnapshot` for asynchronous event aggregation into rectangular alpha inputs
+  - `SubscriptionManager` and `UniverseSelector` for bounded active-universe handling
+  - `StreamingMetrics` for lightweight in-memory telemetry
+  - `AlpacaStreamClient` plus Alpaca trade/quote normalizers
+- New streaming orchestration / OMS types in `shunya.algorithm`:
+  - `StreamingContextBuilder`
+  - `StreamingRunner` and `StreamingDecision`
+  - `OrderManager` and `ManagedOrderBatch`
+- Broker-neutral open-order snapshot surface:
+  - `OpenOrderView`
+  - `ExecutionAdapter.list_open_orders()`
+  - `AlpacaExecutionAdapter.list_open_orders()`
+  - `KiteExecutionAdapter.list_open_orders()`
 - Context-based alpha authoring API in `shunya.algorithm.alpha_context`:
   - `AlphaContext` with canonical series fields (`open`, `high`, `low`, `close`, `adj_volume`)
   - `AlphaSeries` wrapper for history tensors
@@ -70,6 +86,10 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `FinStrat` now exposes reusable seams for non-`finTs` runners:
+  - `scores_from_context(ctx)`
+  - `process_raw_scores(raw_scores, capital, ...)`
+- `README.md` now documents the streaming foundation and explicitly calls out what is not implemented yet.
 - **Breaking:** `FinStrat` now executes context-style alpha callables (`algorithm(ctx)`), replacing legacy panel-index authoring (`algorithm(panel)` / `IX_*` flow).
 - `FinBT` / `FinTrade` now route signal execution through context-based alpha evaluation while preserving downstream sizing/neutralization controls.
 - **Breaking:** `normalize_history_index` and bundled providers align Yahoo/Alpaca timestamps to `BarIndexPolicy` (default **America/New_York**), not forced UTC-naive. Use `BarIndexPolicy(timezone="UTC")` and `daily_anchor="utc"` to recover older daily-like alignment.
@@ -87,6 +107,7 @@ All notable changes to this project are documented in this file.
 ### Testing
 
 - Added tests:
+  - `tests/test_streaming_pipeline.py`
   - `tests/test_fints_classification.py`
   - `tests/test_data_qa.py`
   - `tests/test_execution_adapter.py`
@@ -103,9 +124,26 @@ All notable changes to this project are documented in this file.
   - `tests/test_fintrade.py`
   - `tests/test_finstrat.py`
   - `tests/test_targets.py`
+  - `tests/test_execution_adapter.py`
+  - `tests/test_kite_execution.py`
 - Added trading-time coverage:
   - canonical calendar generation and weekend gap handling
   - strict trading-grid validation on off-grid timestamps
   - elapsed-trading-time decay weighting vs bar-step mode
   - intraday lag parity checks across minute/hour bars
-- Current status: full suite passing (`96 passed`).
+- Added streaming coverage:
+  - micro-bar snapshot construction
+  - `FinStrat.process_raw_scores(...)` parity with `pass_()`
+  - open-order-aware order suppression in `OrderManager`
+  - adapter open-order snapshots for Alpaca and Kite
+- Current status: full suite passing (`175 passed`).
+
+### Not Yet Implemented
+
+- No Kite/Zerodha websocket streaming client in `shunya.streaming`; the new live event feed wrapper is Alpaca-only.
+- `StreamingRunner` does not yet replicate the full `FinTrade.run(...)` feature surface:
+  - `DecisionContext`
+  - decision/session guards
+  - reconciliation/remediation loop
+  - sector/net/turnover/ADV controls
+- No built-in streaming daemon, persistence layer, or replay CLI yet.

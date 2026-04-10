@@ -68,3 +68,26 @@ def test_cancel_open_orders_calls_client():
     adapter = AlpacaExecutionAdapter(client)
     adapter.cancel_open_orders()
     client.cancel_orders.assert_called_once()
+
+
+def test_list_open_orders_filters_terminal_statuses():
+    client = _mock_client()
+    open_order = MagicMock()
+    open_order.id = "oid-open"
+    open_order.symbol = "AAPL"
+    open_order.status = "new"
+    open_order.client_order_id = "cid-open"
+    open_order.side = "buy"
+    open_order.notional = "100.5"
+    filled_order = MagicMock()
+    filled_order.id = "oid-filled"
+    filled_order.symbol = "MSFT"
+    filled_order.status = "filled"
+    client.get_orders.return_value = [open_order, filled_order]
+
+    adapter = AlpacaExecutionAdapter(client)
+    open_views = adapter.list_open_orders()
+    assert len(open_views) == 1
+    assert open_views[0].symbol == "AAPL"
+    assert open_views[0].order_id == "oid-open"
+    assert open_views[0].notional == 100.5
